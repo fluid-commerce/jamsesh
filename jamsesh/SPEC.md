@@ -653,10 +653,12 @@ A26c].
   are kept in IndexedDB, up to 60 segments or 180 seconds, and uploaded oldest first with their
   original host-clock timestamps, so they slot into the transcript where they were said.
 - **Merge.** The canvas merges through FigCraft's collaboration engine. For session state (pins,
-  people, layouts, directives), queued changes replay on top of the host's current state. A queued
-  change to something that changed on the host while you were away is merged field by field, and
-  a change to something that was deleted is dropped and reported in the banner rather than
-  recreating it [A26d].
+  people, layouts, directives), queued changes replay on top of the host's current state, **each call
+  applied as sent: the last writer wins**. Calls change only the fields they name (an annotation edit
+  sends only the text, or only the status), so two people changing different fields do not undo each
+  other, but two changes to the same field do. The hub does not yet read when a change was queued,
+  and a change to something that was deleted meanwhile is refused rather than reported in a banner
+  ([docs/spec-gaps.md](docs/spec-gaps.md) 25) [A26d].
 - The host remembers idempotency keys across restarts for seven days (as long as a laptop keeps a queued change), in its database.
   A reply is saved right after its change is made, not in the same database transaction: a hard crash in that instant (milliseconds)
   can let a retry with the same key repeat that one change. A direct send is also saved on the laptop before it leaves and removed

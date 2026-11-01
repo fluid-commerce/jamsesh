@@ -855,7 +855,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
         const refused = becomePerson(hub, paired, String(body.personId));
         if (refused) return bad(refused, 403);
       }
-      if (body.personId !== undefined) body.personId = hub.auth.get(paired.id)?.personId ?? null;
+      body.personId = hub.auth.get(paired.id)?.personId ?? null; // always the credential's person, whether or not the body says one
     }
     // The person using the host's own window: agents on the host Mac work for them.
     if (hostWindow && owner === "host" && body.kind !== "host" && body.personId) {
@@ -1627,7 +1627,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
 // answer again instead of running twice; one that arrives mid-flight waits for the first.
 const IDEM_TTL_MS = 24 * 60 * 60_000;
 const unsavedReplies = new Set<string>();
-const idemSeen = new Map<string, { at: number; done: Promise<{ status: number; body: string; type: string }> }>();
+const idemSeen = new Map<string, { at: number; pending: boolean; done: Promise<{ status: number; body: string; type: string }> }>();
 const recentSegments = new Set<string>();
 const segmentsInFlight = new Set<string>();
 
@@ -1644,7 +1644,7 @@ async function idempotent(hub: Hub, req: Request, path: string, scope: string, r
   const now = Date.now();
   for (const [k, v] of idemSeen) {
     if (now - v.at < IDEM_TTL_MS && idemSeen.size <= 2000) break;
-    if (!unsavedReplies.has(k)) idemSeen.delete(k); // an answer whose record couldn't be written stays
+    if (!v.pending && !unsavedReplies.has(k)) idemSeen.delete(k); // a call still running, or an answer whose record couldn't be written, stays
   }
   // Answered before a restart: replay it from the database.
   const saved = idemSeen.has(key) ? null : hub.session.store.reply(key);
@@ -1655,7 +1655,7 @@ async function idempotent(hub: Hub, req: Request, path: string, scope: string, r
     return new Response(r.body, { status: r.status, headers: { "content-type": r.type, "x-jam-idem-replay": "1" } });
   }
   let settle!: (r: { status: number; body: string; type: string }) => void;
-  idemSeen.set(key, { at: now, done: new Promise((res) => (settle = res)) });
+  idemSeen.set(key, { at: now, pending: true, done: new Promise((res) => (settle = res)) });
   try {
     const res = await run();
     const body = await res.clone().text();
@@ -1681,7 +1681,11 @@ async function idempotent(hub: Hub, req: Request, path: string, scope: string, r
         setTimeout(again, 2000).unref?.();
       }
     }
+    const entry = idemSeen.get(key);
+    if (entry) entry.pending = false;
     settle(reply);
+    // Written: the database answers any later retry, so memory lets go of it (a failed write keeps it, above).
+    if (!unsavedReplies.has(key) && res.status < 500 && res.status !== 408) idemSeen.delete(key);
     return res;
   } catch (e) {
     idemSeen.delete(key);

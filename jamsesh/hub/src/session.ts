@@ -539,7 +539,8 @@ export class Session {
     const d: Device = {
       id,
       label: fields.label ?? cur?.label ?? "Device",
-      personId: fields.personId !== undefined ? fields.personId : cur?.personId ?? null,
+      // A device that changes hands (its old pairing is gone, a new window claims it) does not keep the old window's person: it is whoever the new owner says, or nobody.
+      personId: fields.personId !== undefined ? fields.personId : cur && fields.pairedId && cur.pairedId && cur.pairedId !== fields.pairedId ? null : cur?.personId ?? null,
       kind: fields.kind ?? cur?.kind ?? "client",
       location: fields.location ?? cur?.location ?? "room",
       micOn: fields.micOn ?? cur?.micOn ?? false,
@@ -2003,6 +2004,7 @@ export class Session {
     const shape = live.map((x) => `${x.id}:${x.width}x${x.height}@${x.screenX},${x.screenY}x${x.dpr}`).sort().join("|");
     if (ids === this.liveScreens.ids && shape === this.liveScreens.shape) return;
     const idsChanged = ids !== this.liveScreens.ids;
+    const hadNone = this.liveScreens.ids === "";
     const before = new Set(this.liveScreens.ids.split("|"));
     this.liveScreens = { ids, shape };
     // A screen that just appeared or came back: what it saved is checked, and its return-to-board wait runs again.
@@ -2013,8 +2015,8 @@ export class Session {
     if (idsChanged) this.dropDeadExpanded();
     bus.changed("screens");
     if (idsChanged) bus.changed("stageTiles");
-    // A window came back while a share was waiting for a screen: it is put up now (its own placement deadline still runs).
-    if (idsChanged && live.some((x) => !before.has(x.id))) {
+    // The first window back after none was open, while a share was waiting for a screen: it is put up now (its own placement deadline still runs).
+    if (idsChanged && hadNone && live.length) {
       const shown = this.shownShareIds();
       for (const sh of this.shares()) if (sh.status === "live" && !shown.has(sh.id) && !this.sharesShown.has(sh.id) && Date.now() - sh.startedAt < Session.SHARE_PLACE_MS) this.placeShare(sh);
     }

@@ -620,3 +620,42 @@ test("targets that isn't a list is a 400, not a crash", async () => {
   const r = await call(mine.token, "POST", "/directives", { text: "do it", targets: "agent_1" });
   expect(r.status).toBe(400);
 });
+
+test("a device whose pairing is gone isn't claimed by the next window under the person it had", async () => {
+  const kim = hub.session.upsertPerson({ name: "Kim" });
+  const first = hub.auth.issue({ kind: "browser", label: "Kim's laptop", ip: "10.0.0.46", personId: kim.id });
+  expect((await call(first.token, "POST", "/devices", { deviceId: "d-kim-lap", personId: kim.id })).status).toBe(200);
+  expect(hub.session.store.get("devices", "d-kim-lap")!.personId).toBe(kim.id);
+  hub.auth.revoke(first.device.id); // the host disconnects that browser
+  const second = hub.auth.issue({ kind: "browser", label: "Someone else", ip: "10.0.0.47" });
+  // Through the device route, naming no person...
+  expect((await call(second.token, "POST", "/devices", { deviceId: "d-kim-lap" })).status).toBe(200);
+  expect(hub.session.store.get("devices", "d-kim-lap")!.personId ?? null).toBeNull();
+  // ...and through a live socket's claim of the id.
+  hub.session.touchDevice("d-kim-lap2", { personId: kim.id, pairedId: first.device.id });
+  hub.session.touchDevice("d-kim-lap2", { pairedId: second.device.id });
+  expect(hub.session.store.get("devices", "d-kim-lap2")!.personId ?? null).toBeNull();
+});
+
+test("a mutation still running when the replay table is full is not forgotten, so its retry waits instead of running it twice", async () => {
+  const win = () => ({ cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}`, "content-type": "application/json" });
+  let runs = 0;
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  const real = hub.brain.digest.bind(hub.brain);
+  (hub.brain as any).digest = async () => (runs++, await held);
+  try {
+    const key = `idem-${Math.random()}`;
+    const first = fetch(`${base}/api/brain/digest`, { method: "POST", headers: { ...win(), "x-jam-idem": key }, body: "{}" });
+    await Bun.sleep(100);
+    // Thousands of other keyed calls come and go while it is still running.
+    for (let i = 0; i < 2100; i++) await fetch(`${base}/api/display`, { method: "POST", headers: { ...win(), "x-jam-idem": `filler-${i}` }, body: JSON.stringify({ width: 1, height: 1, dpr: 1 }) });
+    const retry = fetch(`${base}/api/brain/digest`, { method: "POST", headers: { ...win(), "x-jam-idem": key }, body: "{}" });
+    await Bun.sleep(100);
+    release();
+    await Promise.all([first, retry]);
+    expect(runs).toBe(1);
+  } finally {
+    (hub.brain as any).digest = real;
+  }
+}, 60_000);
