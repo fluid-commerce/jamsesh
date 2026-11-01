@@ -1,5 +1,6 @@
 // People's canvases rejoin when the host publishes the canvas again, and the host starts the
 // canvas server again when it stops (it crashed, or something killed it).
+import { Timers } from "../src/timers";
 import { expect, test } from "bun:test";
 import { Canvas } from "../src/canvas/canvas";
 import { config as cfg } from "../src/config";
@@ -122,20 +123,14 @@ test("a canvas server that runs but never gets healthy is stopped, and start() f
 }, 20_000);
 
 test("stop() clears the watchdog and the reaper", () => {
-  const cleared: unknown[] = [];
-  const real = globalThis.clearInterval;
-  globalThis.clearInterval = ((t: any) => (cleared.push(t), real(t))) as any;
-  try {
-    const a = setInterval(() => {}, 60_000);
-    const b = setInterval(() => {}, 30_000);
-    const canvas: any = { poller: null, timers: [a, b], agents: new Map(), host: null, serverProc: null, helpers: new HelperRegistry(), halt: (Canvas.prototype as any).halt };
-    (Canvas.prototype as any).stop.call(canvas);
-    expect(cleared).toEqual([a, b]);
-    expect(canvas.stopped).toBe(true);
-    expect(canvas.timers).toEqual([]);
-  } finally {
-    globalThis.clearInterval = real;
-  }
+  const registry = new Timers();
+  const a = registry.every(() => {}, 60_000)!;
+  const b = registry.every(() => {}, 30_000)!;
+  const canvas: any = { poller: null, timers: [a, b], agents: new Map(), host: null, serverProc: null, helpers: new HelperRegistry(), halt: (Canvas.prototype as any).halt, roomTimers: () => registry };
+  (Canvas.prototype as any).stop.call(canvas);
+  expect(registry.size).toBe(0); // both ended through the room's registry
+  expect(canvas.stopped).toBe(true);
+  expect(canvas.timers).toEqual([]);
 });
 
 test("a failed canvas server restart marks the canvas failed instead of leaving it live, and is retried", async () => {
@@ -199,7 +194,7 @@ function startable(steps: { server?: () => Promise<void>; host?: () => Promise<v
   const log: string[] = [];
   const session = { canvas: { status: "off" } as any, setCanvas(info: any) { this.canvas = { ...this.canvas, ...info }; } };
   const canvas: any = { session, stopped: false, startFailures: 0, startRetry: null, timers: [], poller: null, agents: new Map(), host: null, serverProc: null, helpers: new HelperRegistry() };
-  for (const k of ["start", "stop", "halt", "checkRunning", "reapLeftovers"]) canvas[k] = (Canvas.prototype as any)[k];
+  for (const k of ["start", "stop", "halt", "checkRunning", "reapLeftovers", "roomTimers"]) canvas[k] = (Canvas.prototype as any)[k];
   canvas.poll = () => {};
   canvas.reapIdleAgents = () => {};
   canvas.watchdog = async () => {};

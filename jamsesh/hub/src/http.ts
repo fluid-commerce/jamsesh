@@ -406,7 +406,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         const appWs = path.match(/^\/ws\/app\/([\w-]+)$/);
         if (appWs) {
           if (!sameOrigin(req)) return bad("Not from this site.", 403);
-          if (!hostWindow && device?.kind !== "browser") return bad(local ? NOT_THE_HOST_WINDOW : "That's for people.", 403);
+          if (!hostWindow && device?.kind !== "browser") return bad(isLocal(ip) ? NOT_THE_HOST_WINDOW : "That's for people.", 403);
           if (!hub.live.get(appWs[1])) return bad("That app isn't live.", 404);
           if (srv.upgrade(req, { data: { deviceId: null, appId: appWs[1], pairedId: device?.id ?? null } as any })) return undefined as any;
           return bad("expected a WebSocket");
@@ -1242,6 +1242,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
   // The project wiki (12.8). People read, search and edit; agents use the jam_wiki_* tools and can't edit pages.
   if (path === "/wiki" || path.startsWith("/wiki/")) {
     if (paired?.kind === "agent") return bad("That's for people; agents use the jam_wiki_ tools.", 403);
+    // Reads too: a bare local process (no credential, no host-window key) sees nothing of the wiki, its sources or its proposals.
+    if (!paired && !hostWindow) return bad(isLocal(ip) ? NOT_THE_HOST_WINDOW : "That's for people.", 403);
     // Who writes is who is signed in: a paired person's own device, or the host's window as its person. Never a
     // personId in the body, which any caller could fill in (HUMAN_ONLY above already refused other loopback callers).
     const p = paired ? (paired.personId ? s.person(paired.personId) : undefined) : hostWindow ? s.person(s.store.setting<string>("hostPersonId", "")) : undefined;

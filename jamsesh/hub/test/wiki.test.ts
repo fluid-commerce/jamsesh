@@ -363,25 +363,27 @@ test("the routes: people read, search, edit and add sources; agents and stranger
     expect((await call("PUT", "/wiki/page/notes", { markdown: "# Notes\n\nagain", personId: r.chey.id }, person())).status).toBe(409);
     expect((await call("PUT", "/wiki/page/notes", { markdown: "# Notes", rev: created.rev, personId: r.chey.id, category: "bogus" }, person())).status).toBe(400);
 
-    const list = await (await call("GET", "/wiki/pages")).json();
+    // A bare local process (no credential, no host-window key) sees nothing of the wiki.
+    for (const path of ["/wiki/pages", "/wiki/sources", "/wiki/graph", "/wiki/search?q=notes", "/wiki/proposal/x/y"]) expect([path, (await call("GET", path)).status]).toEqual([path, 403]);
+    const list = await (await call("GET", "/wiki/pages", undefined, person())).json();
     expect(list.pages.map((p: any) => p.slug)).toEqual(["notes"]);
-    expect((await call("GET", "/wiki/page/notes")).status).toBe(200);
-    for (const p of ["..%2F..%2Fetc%2Fpasswd", "..", "nope", "a%00b"]) expect((await call("GET", `/wiki/page/${p}`)).status).toBe(404);
-    expect((await call("GET", "/wiki/source/..%2FWIKI")).status).toBe(404);
-    expect((await (await call("GET", "/wiki/search?q=notes")).json()).results[0].slug).toBe("notes");
-    expect((await (await call("GET", "/wiki/graph")).json()).nodes).toHaveLength(1);
-    expect((await (await call("GET", "/wiki/log")).json()).entries[0].text).toContain("Chey");
+    expect((await call("GET", "/wiki/page/notes", undefined, person())).status).toBe(200);
+    for (const p of ["..%2F..%2Fetc%2Fpasswd", "..", "nope", "a%00b"]) expect((await call("GET", `/wiki/page/${p}`, undefined, person())).status).toBe(404);
+    expect((await call("GET", "/wiki/source/..%2FWIKI", undefined, person())).status).toBe(404);
+    expect((await (await call("GET", "/wiki/search?q=notes", undefined, person())).json()).results[0].slug).toBe("notes");
+    expect((await (await call("GET", "/wiki/graph", undefined, person())).json()).nodes).toHaveLength(1);
+    expect((await (await call("GET", "/wiki/log", undefined, person())).json()).entries[0].text).toContain("Chey");
 
     // Add to wiki: text, a link (never fetched), nothing, and a bad link.
     const doc = await call("POST", "/wiki/sources", { title: "Kickoff", text: "We start Monday.", personId: r.chey.id }, person());
     expect(doc.status).toBe(201);
     const id = (await doc.json()).source.id;
-    expect((await (await call("GET", `/wiki/source/${id}`)).json()).text).toBe("We start Monday.");
+    expect((await (await call("GET", `/wiki/source/${id}`, undefined, person())).json()).text).toBe("We start Monday.");
     expect((await call("POST", "/wiki/sources", { title: "Spec", url: "https://example.com/spec", personId: r.chey.id }, person())).status).toBe(201);
     expect((await call("POST", "/wiki/sources", { title: "x", url: "file:///etc/passwd", personId: r.chey.id }, person())).status).toBe(400);
     expect((await call("POST", "/wiki/sources", { title: "x", personId: r.chey.id }, person())).status).toBe(400);
     expect((await call("POST", "/wiki/sources", { title: "x", attachment: "att_0000000000000000", personId: r.chey.id }, person())).status).toBe(400);
-    expect((await (await call("GET", "/wiki/sources")).json()).sources[0]).toMatchObject({ ingested: false, state: "pending" });
+    expect((await (await call("GET", "/wiki/sources", undefined, person())).json()).sources[0]).toMatchObject({ ingested: false, state: "pending" });
 
     // Ingest through the route, then accept through the Tasks board's own route, with pages.
     r.w.decide = (async () => ({ summary: "Kickoff", pages: [page("kickoff", "Kickoff", "topic", "We start Monday."), page("extra", "Extra", "topic", "Not wanted.")] })) as Decider;

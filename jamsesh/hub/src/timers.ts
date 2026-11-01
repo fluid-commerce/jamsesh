@@ -4,6 +4,8 @@ type Handle = ReturnType<typeof setTimeout>;
 
 export class Timers {
   private live = new Set<Handle>();
+  /** Callbacks that returned a promise and haven't settled: closing the room waits for them (a timer job already running is work in flight). */
+  private running = new Set<Promise<unknown>>();
   private closed = false;
 
   private run(fn: () => unknown) {
@@ -13,7 +15,11 @@ export class Timers {
     };
     try {
       const r = fn();
-      if (r && typeof (r as Promise<unknown>).catch === "function") (r as Promise<unknown>).catch(fail);
+      if (r && typeof (r as Promise<unknown>).catch === "function") {
+        const p = (r as Promise<unknown>).catch(fail);
+        this.running.add(p);
+        void p.finally(() => this.running.delete(p));
+      }
     } catch (e) {
       fail(e);
     }
@@ -43,6 +49,11 @@ export class Timers {
     if (!t) return;
     clearTimeout(t);
     this.live.delete(t);
+  }
+
+  /** How many timer callbacks are still running (async ones). */
+  get busy() {
+    return this.running.size;
   }
 
   get size() {

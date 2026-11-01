@@ -1261,7 +1261,7 @@ describe("the bundled agent setup", () => {
 
   test("it refuses a relay that isn't this Mac, and a missing hook file, before changing anything", async () => {
     const f = await emitted();
-    for (const env of <Record<string, string>[]>[{ JAMSESH_HUB: "https://evil.example", JAMSESH_HOOK_FILE: f.hook }, { JAMSESH_HUB: "http://127.0.0.1.evil.example:80", JAMSESH_HOOK_FILE: f.hook }, { JAMSESH_HUB: origin, JAMSESH_HOOK_FILE: join(f.dir, "nope") }, { JAMSESH_HOOK_FILE: f.hook }]) {
+    for (const env of <Record<string, string>[]>[{ JAMSESH_HUB: "https://evil.example", JAMSESH_HOOK_FILE: f.hook }, { JAMSESH_HUB: "http://127.0.0.1.evil.example:80", JAMSESH_HOOK_FILE: f.hook }, { JAMSESH_HUB: "http://127.0.0.1:80@evil.example", JAMSESH_HOOK_FILE: f.hook }, { JAMSESH_HUB: "http://127.0.0.1:80/x", JAMSESH_HOOK_FILE: f.hook }, { JAMSESH_HUB: "http://127.0.0.1:123456", JAMSESH_HOOK_FILE: f.hook }, { JAMSESH_HUB: origin, JAMSESH_HOOK_FILE: join(f.dir, "nope") }, { JAMSESH_HOOK_FILE: f.hook }]) {
       const box = sandbox();
       stubCli(join(box.bin, "claude"), box.log);
       const r = await runBundled(box, f, env);

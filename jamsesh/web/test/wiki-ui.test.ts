@@ -168,8 +168,8 @@ test("a wiki card on the Tasks board: the checked pages are written through api(
   await api(`/triage/${card.id}/add`, { personId: person.id, pages: ["pricing"] });
   expect((await wikiApi.pages()).pages.map((p) => p.slug)).toContain("pricing");
   expect((await wikiApi.pages()).pages.map((p) => p.slug)).not.toContain("billing");
-  // Accepting twice says so instead of writing again.
-  await expect(api(`/triage/${card.id}/add`, { personId: person.id, pages: ["billing"] })).rejects.toBeTruthy();
+  // Accepting twice answers with the finished card (the board is retry-safe) and writes nothing more.
+  await api(`/triage/${card.id}/add`, { personId: person.id, pages: ["billing"] });
   expect((await wikiApi.pages()).pages.map((p) => p.slug)).not.toContain("billing");
 });
 

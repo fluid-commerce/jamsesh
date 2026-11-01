@@ -169,6 +169,8 @@ export function initWiki(dir: string): void {
 /** Vault folders that have taken their last write (the room stopped), and requests past the shutdown deadline. Every write to the vault goes through `io`, so this is the one gate. */
 const closedVaults = new Set<string>();
 export const closeVault = (dir: string) => void closedVaults.add(dir);
+/** True when a request past the shutdown deadline, or a stopped room's vault: the Git index and its follow note are not touched then. */
+const vaultClosed = (dir: string) => pastDeadline() || [...closedVaults].some((d) => dir === d || dir.startsWith(`${d}/`));
 const gate = (path: unknown) => {
   if (pastDeadline()) throw Object.assign(new Error("The room is closed."), { code: "ESEALED" });
   const p = String(path);
@@ -302,6 +304,7 @@ export type Take = "take" | "skip" | "fail";
 export type Accept = (path: string, state: Buffer | "gone" | "unreadable" | "toobig") => Take;
 
 export function commitPaths(dir: string, message: string, paths: string[], accept?: Accept): "done" | "nothing" | "failed" {
+  if (vaultClosed(dir)) return "failed"; // the room is closed: no Git or index change (the follow note stays for the next start)
   if (!present(join(dir, ".git"))) return "nothing"; // no repository: no history to keep
   if (!gitAvailable()) return "failed"; // a repository, but git can't be run right now: not "nothing to commit"
   const own = [...new Set(paths)].filter((p) => followPath(p) && !p.split("/").includes(".git")); // only the vault's own files (the same rule the index note holds to)
@@ -584,6 +587,7 @@ function resumeFollow(dir: string, gitDir: string, lock: IndexLock) {
 
 /** Finishes any index update an earlier commit left undone (the pass and startup call this). Quietly does nothing if the index is busy. */
 export function settleIndex(dir: string): void {
+  if (vaultClosed(dir)) return; // the room is closed: the follow note waits for the next start
   if (!gitAvailable()) return;
   const gitDir = ownGitDir(dir);
   if (!gitDir) return;

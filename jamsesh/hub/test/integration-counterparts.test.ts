@@ -1278,3 +1278,14 @@ test("after a comment command whose reply was lost, the retry looks for the comm
     hub.stop();
   }
 });
+
+test("once the vault is closed, committing and settling the index change no Git state", async () => {
+  const { mkdirSync, writeFileSync } = await import("node:fs");
+  const { closeVault, commitPaths, settleIndex } = await import("../src/wiki/files");
+  const v = mkdtempSync(join(dir, "vault-"));
+  mkdirSync(join(v, ".git"), { recursive: true });
+  writeFileSync(join(v, ".git", "jamsesh-follow.json"), "[]");
+  closeVault(v);
+  expect(commitPaths(v, "late", ["wiki/x.md"])).toBe("failed");
+  expect(() => settleIndex(v)).not.toThrow();
+});

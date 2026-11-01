@@ -370,7 +370,8 @@ export class Hub {
     this.closing = true;
     // The router is asked to close the port from the start, not after the drain: its replies take seconds, and it must finish before exit.
     const netStop = this.net.close();
-    this.session.timers.stop(); // no timer of the room fires from here on: none can write past the seal
+    this.session.timers.stop(); // no timer of the room fires from here on: none can write past the seal (one already running is waited for below)
+    this.devproxy.stop(); // its dev-server check no longer writes either
     this.autosave.stop();
     this.keeper.stop();
     this.awake.stop();
@@ -511,6 +512,7 @@ export class Hub {
   /** What is still being worked on: tracked work, and room speech still being transcribed. */
   working(): string[] {
     const names = [...new Set(this.inflight.values())];
+    if (this.session.timers.busy) names.push("a timer job");
     if (this.audio.pending > 0) names.push("transcription of speech");
     return [...names, ...this.brain.busy()];
   }

@@ -53,6 +53,7 @@ function room(dataDir = join(dir, String(Math.random()))) {
   const hub = new Hub({ canvas: false, whisper: false, dataDir, teamDir: join(dir, "team") });
   hubs.push(hub);
   clearInterval((hub.brain as any).digestTimer);
+  hub.brain.curateInDigest = true; // these tests are about the curation pass itself; in a running hub the wiki's ingest does that job (12.8)
   const s = hub.session;
   s.updateSettings({ voiceReplies: false, hostControl: false });
   s.store.setSetting("gatewayKey", "test-key-not-real");

@@ -49,3 +49,17 @@ test("clear() removes one timer from the registry", () => {
   expect(t.size).toBe(0);
   t.clear(null);
 });
+
+test("a timer callback that is still running is counted as busy until it settles, even after stop()", async () => {
+  const { Timers } = await import("../src/timers");
+  const t = new Timers();
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  t.after(() => held, 5);
+  await Bun.sleep(30);
+  t.stop();
+  expect(t.busy).toBe(1); // started before stop: shutdown waits for it
+  release();
+  await Bun.sleep(10);
+  expect(t.busy).toBe(0);
+});

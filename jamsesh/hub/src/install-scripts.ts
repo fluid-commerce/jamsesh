@@ -304,7 +304,7 @@ main() {
 ${
   bundled
     ? `HUB="\${JAMSESH_HUB:-}"
-case "$HUB" in http://127.0.0.1:[0-9]*) ;; *) echo "ERROR: Setup is run by the JamSesh app, which names its relay on this Mac." >&2; exit 1 ;; esac
+[[ "$HUB" =~ ^http://127\\.0\\.0\\.1:[0-9]{1,5}$ ]] || { echo "ERROR: Setup is run by the JamSesh app, which names its relay on this Mac." >&2; exit 1; }
 TOKEN=""
 HOOK_FILE="\${JAMSESH_HOOK_FILE:-}"
 [ -f "$HOOK_FILE" ] || { echo "ERROR: The JamSesh app's hook file is missing; reinstall the app." >&2; exit 1; }`

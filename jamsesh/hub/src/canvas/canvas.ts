@@ -1,6 +1,7 @@
 // The shared canvas. The hub runs figcraft-server, keeps one host participant in
 // the session file, renders frames to PNG as they settle, and gives each agent its
 // own headless FigCraft participant on the host (so agents install nothing).
+import { Timers } from "../timers";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
@@ -50,6 +51,11 @@ export class Canvas {
   private agents = new Map<string, AgentCanvas>();
   private tracked = new Map<string, Tracked>();
   private touched = new Map<string, { agentId: string; at: number }>();
+  private ownTimers: Timers | null = null;
+  /** The room's timer registry (closing the room ends them all); a Canvas built without a session of its own (tests) keeps its own. */
+  private roomTimers(): Timers {
+    return this.session.timers ?? (this.ownTimers ??= new Timers());
+  }
   private poller: ReturnType<typeof setInterval> | null = null;
   private timers: ReturnType<typeof setInterval>[] = [];
   private stopped = false;
@@ -118,8 +124,8 @@ export class Canvas {
       this.checkRunning();
       this.startFailures = 0;
       // The room's timer registry: closing the room ends them all in one call.
-      this.poller = this.session.timers.every(() => this.poll(), POLL_MS);
-      this.timers = [this.session.timers.every(() => this.reapIdleAgents(), 60_000), this.session.timers.every(() => this.watchdog().catch(() => {}), 30_000)].filter((x): x is NonNullable<typeof x> => x !== null);
+      this.poller = this.roomTimers().every(() => this.poll(), POLL_MS);
+      this.timers = [this.roomTimers().every(() => this.reapIdleAgents(), 60_000), this.roomTimers().every(() => this.watchdog().catch(() => {}), 30_000)].filter((x): x is NonNullable<typeof x> => x !== null);
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
       if (!this.stopped) console.error("canvas:", reason);
@@ -164,8 +170,8 @@ export class Canvas {
   halt() {
     this.stopped = true;
     if (this.startRetry) clearTimeout(this.startRetry);
-    this.session.timers.clear(this.poller);
-    for (const t of this.timers.splice(0)) this.session.timers.clear(t);
+    this.roomTimers().clear(this.poller);
+    for (const t of this.timers.splice(0)) this.roomTimers().clear(t);
   }
 
   /** Halts, then stops every helper in the registry. True when each one's exit was seen (a TERM-resistant one gets KILL). */
@@ -561,14 +567,14 @@ export class Canvas {
     } else if (tool === "run_command" && /^(node|frame|component)\.create/.test(String(args?.command ?? ""))) a.created++;
     else a[k]++;
     this.session.touchAgent(agent.id, { status: "working", activity: "Designing on the canvas" });
-    if (!a.timer) a.timer = this.session.timers.after(() => this.reportActivity(agent), 12_000);
+    if (!a.timer) a.timer = this.roomTimers().after(() => this.reportActivity(agent), 12_000);
   }
 
   /** Writes one agent's batched canvas work into the feed (when its timer fires, and for every agent at shutdown). */
   private reportActivity(agent: { id: string; name: string }) {
     const cur = this.activity.get(agent.id);
     if (!cur) return;
-    this.session.timers.clear(cur.timer);
+    this.roomTimers().clear(cur.timer);
     this.activity.delete(agent.id);
     const parts = [cur.created && `${cur.created} new layer${cur.created > 1 ? "s" : ""}`, cur.edited && `${cur.edited} edit${cur.edited > 1 ? "s" : ""}`].filter(Boolean);
     if (parts.length) this.session.store.addEvent({ kind: "canvas", authorType: "agent", authorId: agent.id, authorName: agent.name, text: `Canvas: ${parts.join(", ")}.`, relevance: "work" });
