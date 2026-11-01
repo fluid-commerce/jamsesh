@@ -1043,3 +1043,36 @@ test("a real jam_inbox call is tracked like jam_wait, so its items are marked re
     hub.stop();
   }
 });
+
+test("a canvas pin is a FigCraft comment only once FigCraft has confirmed it: an unavailable or failing canvas is retried, a delivered one is not repeated", async () => {
+  process.env.JAMSESH_SILENT = "1";
+  const { Hub } = await import("../src/hub");
+  const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "canvas-comments"), teamDir: join(dir, "team-cc") });
+  try {
+    clearInterval((hub.brain as any).digestTimer);
+    const s = hub.session;
+    const pin = s.addAnnotation({ personId: null, authorName: "Mo", target: { kind: "canvas", ref: "Frame 1", label: "Frame 1", canvasX: 10, canvasY: 20 }, x: 0.1, y: 0.1, text: "tighten this", source: "pin" } as any);
+    const sent: string[] = [];
+    let mode: "down" | "fails" | "ok" = "down";
+    (hub.canvas as any).comment = async (a: any) => {
+      if (mode === "down") return false;
+      if (mode === "fails") throw new Error("command failed");
+      sent.push(a.id);
+      return true;
+    };
+    expect(await hub.deliverComment(pin.id)).toBe(false);
+    mode = "fails";
+    expect(await hub.deliverComment(pin.id)).toBe(false);
+    expect(s.store.get("annotations", pin.id)!.commentDone).toBeFalsy();
+    mode = "ok";
+    await hub.flushComments(); // the timer's job once the canvas is back
+    expect(sent).toEqual([pin.id]);
+    expect(s.store.get("annotations", pin.id)!.commentDone).toBe(true);
+    await hub.flushComments();
+    expect(await hub.deliverComment(pin.id)).toBe(true);
+    expect(sent.length).toBe(1); // never repeated
+  } finally {
+    hub.devproxy.stop();
+    hub.stop();
+  }
+});

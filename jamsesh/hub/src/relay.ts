@@ -194,6 +194,7 @@ export class Upstream {
       }
       if (op === 10) continue;
       if (op === 1 || op === 2) {
+        if (this.fragOp) return this.finish("bad frame"); // a new message while one is still being assembled
         this.fragOp = op;
         this.fragments = [];
         this.fragBytes = 0;

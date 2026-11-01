@@ -271,8 +271,9 @@ export class Hub {
     void this.fonts.scan().catch(() => {});
     this.autosave.start();
     this.keeper.start();
-    this.intervals.push(setInterval(() => this.devproxy.refresh(), 30_000), setInterval(() => this.session.tick(), 60_000));
+    this.intervals.push(setInterval(() => this.devproxy.refresh(), 30_000), setInterval(() => this.session.tick(), 60_000), setInterval(() => void this.flushComments(), 20_000));
     this.intervals[1]?.unref?.();
+    this.intervals[2]?.unref?.();
     // Connected clients learn where an HTTPS page reaches the dev servers when remote access turns on, off, or changes.
     let devPublic = String(this.session.devPublicBase(0));
     this.intervals.push(
@@ -345,6 +346,34 @@ export class Hub {
     this.session.stop();
     this.transcriber.stop(); // whisper and Parakeet: no new start or download (their servers are in the helper list below)
     return this.helpers.stopAll(); // the one list of helper processes: canvas server, MCP participants, key helper, whisper
+  }
+
+  private commentsRunning = false;
+  /** Gives a canvas pin to FigCraft as a comment; it is marked done only once FigCraft has confirmed it, so a failed or unavailable canvas is retried (see flushComments). */
+  async deliverComment(id: string): Promise<boolean> {
+    const a = this.session.store.get("annotations", id);
+    if (!a || a.commentDone || a.target.kind !== "canvas" || a.target.canvasX == null) return true;
+    try {
+      if (!(await this.canvas.comment(a))) return false;
+    } catch (e) {
+      console.error("canvas comment:", e instanceof Error ? e.message : e);
+      return false;
+    }
+    this.session.store.patch("annotations", id, { commentDone: true });
+    return true;
+  }
+
+  /** Every canvas pin FigCraft hasn't confirmed yet, one at a time. */
+  async flushComments() {
+    if (this.commentsRunning || this.closing) return;
+    this.commentsRunning = true;
+    try {
+      for (const a of this.session.store.all("annotations")) {
+        if (a.target.kind === "canvas" && a.target.canvasX != null && !a.commentDone && !(await this.deliverComment(a.id))) break; // the canvas isn't taking them now: later
+      }
+    } finally {
+      this.commentsRunning = false;
+    }
   }
 
   private intervals: ReturnType<typeof setInterval>[] = [];
@@ -952,7 +981,7 @@ export class Hub {
         const have = s.store.all("annotations").find((a) => a.recordingId === w.recordingId && a.noteId === n.id);
         const ann = have ?? s.addAnnotation({ personId: person.id, target: n.pin.target, x: n.pin.x, y: n.pin.y, text: n.text, source: "pin", scroll: n.pin.scroll ?? null, screenId: n.screenId ?? null, recordingId: w.recordingId, noteId: n.id, crop });
         pins.push(ann);
-        if (!have && ann.target.kind === "canvas" && ann.target.canvasX != null) this.canvas.comment(ann).catch(() => {});
+        if (ann.target.kind === "canvas" && ann.target.canvasX != null) void this.deliverComment(ann.id); // a retry of the send also finds an undelivered one
       }
       const item = { n, crop };
       if (owner) byAgent.set(owner, [...(byAgent.get(owner) ?? []), item]);

@@ -1401,7 +1401,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
       delete body.authorName;
     }
     const ann = s.addAnnotation({ personId: body.personId ?? null, authorName: body.authorName, target: body.target, x: body.x, y: body.y, text: String(body.text ?? ""), source: body.source === "pointer" ? "pointer" : "pin" });
-    if (ann.target.kind === "canvas" && ann.target.canvasX != null) hub.canvas.comment(ann).catch(() => {});
+    if (ann.target.kind === "canvas" && ann.target.canvasX != null) void hub.deliverComment(ann.id); // retried until FigCraft confirms it
     return json(ann);
   }
   if (path === "/annotations/send" && req.method === "POST") {

@@ -441,6 +441,8 @@ export interface Annotation {
   source: "pin" | "pointer";
   status: "open" | "sent" | "done";
   promptEventId: number | null;
+  /** For a canvas pin: set once FigCraft has confirmed the comment. Until then it is retried (when the canvas is back, and on a timer). */
+  commentDone?: boolean;
 }
 
 /** One pointer moment in a recording (after CursorCap's dwell/click model), with where it happened. */

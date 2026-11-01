@@ -230,3 +230,30 @@ test("an empty message that went out is not a failure", () => {
   expect(fine.log.closed).toEqual([]);
   expect(fine.log.sent).toBe(2);
 });
+
+test("the relay refuses a new message that starts while another is still being assembled, instead of delivering the later piece as a whole", () => {
+  const { Upstream } = require("../src/relay");
+  const events = { opened: 0, messages: [] as unknown[], closed: [] as (string | undefined)[] };
+  const up: any = Object.create(Upstream.prototype);
+  Object.assign(up, {
+    open: true,
+    held: 0,
+    sock: null,
+    pending: [],
+    head: new Uint8Array(0),
+    shaken: true,
+    done: false,
+    fragments: [],
+    fragOp: 0,
+    fragBytes: 0,
+    path: "/",
+    maxBytes: () => 1_000_000,
+    ev: { open: () => events.opened++, message: (m: unknown) => events.messages.push(m), close: (why?: string) => events.closed.push(why) },
+  });
+  const frame = (first: number, text: string) => Uint8Array.from([first, text.length, ...new TextEncoder().encode(text)]);
+  // Text frame without FIN, then another text frame (a new message) with FIN: invalid.
+  up.onBytes(frame(0x01, "par"), "k");
+  up.onBytes(frame(0x81, "tial"), "k");
+  expect(events.messages).toEqual([]);
+  expect(events.closed.length).toBe(1);
+});

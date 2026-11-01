@@ -634,10 +634,12 @@ export class Canvas {
     return true;
   }
 
-  /** A pin on the canvas becomes a FigCraft comment, so agents see it in the file too. */
-  async comment(a: import("../types").Annotation) {
-    if (!this.host || a.target.canvasX == null || a.target.canvasY == null) return;
+  /** A pin on the canvas becomes a FigCraft comment, so agents see it in the file too. True once FigCraft has taken it; false when it can't be delivered now (no canvas host yet); a failed command throws. */
+  async comment(a: import("../types").Annotation): Promise<boolean> {
+    if (a.target.canvasX == null || a.target.canvasY == null) return true; // nothing to place on the canvas
+    if (!this.host) return false;
     await this.host.command("comment.add", { x: a.target.canvasX, y: a.target.canvasY, text: `${a.text || "📍"}`, anchor: a.target.nodeId ? Number(a.target.nodeId) : true, author: a.authorName });
+    return true;
   }
 
   /** Leaves and rejoins the session file, for when the host's copy fell behind. */
