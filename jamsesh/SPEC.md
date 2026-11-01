@@ -472,6 +472,12 @@ the boxes. On a Mac browser it offers **Get the JamSesh app**.
 Agents join through the MCP endpoint `/mcp` (see [6](#6-agents-mcp-tools-and-the-skill)). There
 are two ways to set them up, and neither needs a script the person runs by hand [A25a]:
 
+**Trust boundary (open decision for the owner).** **Connect my agents** in the Mac app fetches the installer, `/agent/setup.sh`, from the
+session host through the relay and runs it with `bash`; the app checks only that it is a script. The person who clicks it therefore
+trusts the host they joined as they would trust software they installed from that host. A host that is not trusted could run commands as that
+person. Closing this means bundling the installer in the app (the host and relay details passed as data) or signing it; that is not done in this
+release candidate.
+
 - **With the Mac app (preferred).** **Connect my agents** (offered once, and always in the menu)
   sets up Claude Code and Codex on that Mac to reach the session through the local relay. After
   that, a person says `connect to jamsesh` to an agent in any repository and it joins as theirs,
