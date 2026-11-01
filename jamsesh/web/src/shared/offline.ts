@@ -47,7 +47,48 @@ export interface Table<T> {
 
 // One queue per host: changes made for one host never replay into another.
 const DB_NAME = () => (currentHostKey() ? `jamsesh-offline-${currentHostKey()}` : "jamsesh-offline");
+const LEGACY_DB = "jamsesh-offline";
 const STORES = ["outbox", "audio"] as const;
+
+/**
+ * Moves what an earlier page load saved before it knew the host (the unscoped database) into this host's database:
+ * every audio segment, and every queued call that isn't stamped for a different host. Rows are copied first and
+ * removed from the old database only after all of them are in the new one. Nothing is created if there was no old database.
+ */
+async function migrateLegacy(target: IDBDatabase): Promise<void> {
+  const old = await new Promise<IDBDatabase | null>((resolve) => {
+    try {
+      const req = indexedDB.open(LEGACY_DB, 1);
+      let existed = true;
+      req.onupgradeneeded = () => {
+        existed = false;
+        req.transaction?.abort(); // it did not exist: do not create it
+      };
+      req.onsuccess = () => resolve(existed ? req.result : null);
+      req.onerror = () => resolve(null);
+      req.onblocked = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+  if (!old) return;
+  try {
+    const host = currentHostKey();
+    for (const store of STORES) {
+      if (!old.objectStoreNames.contains(store)) continue;
+      const rows = (await wrap(old.transaction(store).objectStore(store).getAll())) as (Record<string, unknown> & { seq: number })[];
+      const mine = rows.filter((r) => store === "audio" || !r.hostId || r.hostId === host);
+      if (!mine.length) continue;
+      for (const r of mine) {
+        const { seq: _seq, ...rest } = r;
+        await wrap(target.transaction(store, "readwrite").objectStore(store).add(rest));
+      }
+      for (const r of mine) await wrap(old.transaction(store, "readwrite").objectStore(store).delete(r.seq));
+    }
+  } finally {
+    old.close();
+  }
+}
 let dbPromise: Promise<IDBDatabase | null> | null = null;
 
 function openDb(): Promise<IDBDatabase | null> {
@@ -59,7 +100,12 @@ function openDb(): Promise<IDBDatabase | null> {
       req.onupgradeneeded = () => {
         for (const s of STORES) if (!req.result.objectStoreNames.contains(s)) req.result.createObjectStore(s, { keyPath: "seq", autoIncrement: true });
       };
-      req.onsuccess = () => resolve(req.result);
+      req.onsuccess = () => {
+        const db = req.result;
+        // Work saved before the host was known sits in the unscoped database: it joins this host's, once.
+        if (DB_NAME() !== LEGACY_DB) void migrateLegacy(db).then(() => resolve(db), () => resolve(db));
+        else resolve(db);
+      };
       req.onerror = () => resolve(null);
       req.onblocked = () => resolve(null);
     } catch {

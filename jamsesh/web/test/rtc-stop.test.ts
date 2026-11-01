@@ -126,3 +126,35 @@ test("two starts while the picker is open share one capture, and Stop releases e
     Object.defineProperty(globalThis.navigator, "mediaDevices", { value: media, configurable: true });
   }
 });
+
+test("stopping a share while the hub is still registering it ends the share the hub then creates", async () => {
+  const fake = fakeStream();
+  const media = (globalThis.navigator as any).mediaDevices;
+  Object.defineProperty(globalThis.navigator, "mediaDevices", { value: { getUserMedia: async () => fake.stream, getDisplayMedia: async () => fake.stream }, configurable: true });
+  const calls: string[] = [];
+  const realFetch = globalThis.fetch;
+  let answer!: () => void;
+  const held = new Promise<void>((r) => (answer = r));
+  globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
+    calls.push(`${init.method ?? "GET"} ${url}`);
+    if (init.method === "POST" && url.endsWith("/api/shares")) {
+      await held;
+      return new Response(JSON.stringify({ id: "sh-made", kind: "camera", status: "live" }));
+    }
+    return new Response("{}");
+  }) as any;
+  try {
+    const { startShareForTest } = await import("../src/shared/share");
+    const started = startShareForTest("camera");
+    await new Promise((r) => setTimeout(r, 20));
+    fake.end(); // the browser's Stop sharing, before the hub has answered
+    await new Promise((r) => setTimeout(r, 20));
+    answer();
+    await expect(started).rejects.toThrow();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls).toContain("DELETE /api/shares/sh-made");
+  } finally {
+    globalThis.fetch = realFetch;
+    Object.defineProperty(globalThis.navigator, "mediaDevices", { value: media, configurable: true });
+  }
+});

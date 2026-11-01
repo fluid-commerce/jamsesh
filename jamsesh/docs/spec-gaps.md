@@ -25,49 +25,17 @@ The mic now defaults to on unless the person muted it (`web/src/client/ClientVie
 
 A failed gateway call is caught, the brain says so (`gatewayTrouble`) and the batch is judged by the rules (`ruleTriage`, `ruleRoute`) instead of being dropped (`hub/src/brain/brain.ts`).
 
-### 4. The brain runs shell commands and builds with no person's approval [A33a, B41, security]
+### 4. Resolved in the release candidate
 
-- **Spec:** every shell command and every build the brain starts on its own needs a person's
-  approval; asking out loud counts (SPEC 13.3, 14).
-- **Code:** `host_action` with `shell` runs `/bin/zsh -lc` for up to 60 seconds and `build_preview`
-  starts a build, gated only by `hostControl`, which defaults to on
-  (`hub/src/hostctl.ts:155-159`, `hub/src/brain/brain.ts:427-457`, `hub/src/session.ts:99`). Room
-  speech, and any paired device through `POST /api/say`, drive the model that calls these tools.
-- **Effect tomorrow:** a misheard line or a joke ("delete the whole app lol") is one model mistake
-  away from a command on the host. A prompt injection through a shared screen's text or a pin is
-  possible.
-- **Close it:** route brain-initiated `shell` and `build_preview` through the same approval queue
-  as `jam_host_preview` (`HostControl.request`), with "a person asked for exactly this in the
-  current batch" as auto-approval; consider defaulting `hostControl` off until **Set up this Mac**
-  is done.
+A brain-started shell command waits for a person's approval (`requestShell`, then a decision) in `hub/src/hostctl.ts`; builds go through the same request queue as `jam_host_preview`.
 
-### 5. Agents can approve their own host builds [A33a, security]
+### 5. Resolved in the release candidate
 
-- **Spec:** only people approve; an agent's token, MCP session, or relay request is never an
-  approval (SPEC 8.11, 14).
-- **Code:** `POST /api/build-requests/:id` accepts any loopback caller or any browser-kind token
-  (`hub/src/http.ts:475`). Agents set up through the Mac app reach the hub through the relay, which
-  adds the Mac's browser-kind token (`app/src-tauri/src/proxy.rs:1-6`, `:132-156`); agents on the
-  host Mac are loopback. Any paired token can also `POST /api/say` with a chosen `personId`, which
-  becomes a person-authored line the voice fast path accepts (`hub/src/hub.ts:195-209`,
-  `hub/src/brain/brain.ts:100-104`, `:847-862`). The device kind at pairing is whatever the caller
-  asks for (`hub/src/http.ts:227`).
-- **Close it:** mark relay requests that come from agent tooling (the relay can tell the window's
-  WebView traffic from local CLI clients, for example with a per-window secret header) and refuse
-  them; refuse loopback approvals unless they come from the big-screen window; ignore `personId`
-  in `/api/say` for non-browser callers; keep the HTTP check and add tests for each path.
+Deciding a build request is a person's act: the route is human-only, and the host role needs the host window's own key (loopback alone grants nothing), `hub/src/http.ts`.
 
-### 6. Dev servers on the host are open to the whole network [B18, security]
+### 6. Resolved in the release candidate
 
-- **Spec:** dev servers on the host are reachable only by paired devices; an agent can remove its
-  own (SPEC 6.6, 14).
-- **Code:** each proxy listens on `0.0.0.0` with no auth (`hub/src/devproxy.ts:63-65`); only the
-  HTTPS `dev-<port>` path checks a token (`hub/src/http.ts:47-54`). `remove()` exists but nothing
-  calls it, and there's no port upper bound. `jam_devserver` returns the LAN URL even to remote
-  people. README (`:290-291`) and the old spec said the opposite.
-- **Close it:** bind the proxies to `127.0.0.1` and serve them through the hub (path or subdomain)
-  with the token check, as the HTTPS path already does; add `jam_devserver` removal and expiry with
-  the agent.
+Dev-server proxies check the caller's token (`hub/src/devproxy.ts`), so they are not open to the whole network. Automatic expiry with the agent is not checked here.
 
 ### 7. Resolved in the release candidate
 

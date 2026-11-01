@@ -118,6 +118,14 @@ export class AudioBuffer {
 
   /** A finished speech segment: straight to the hub when it is reachable, else saved. */
   async submit(seg: AudioSeg) {
+    // One at a time, oldest first: a second segment can't be uploaded while the first is still on its way and arrive before it.
+    const run = this.chain.then(() => this.submitOne(seg));
+    this.chain = run.catch(() => {});
+    return run;
+  }
+  private chain: Promise<unknown> = Promise.resolve();
+
+  private async submitOne(seg: AudioSeg) {
     await this.load();
     const direct = !this.rows.length && !this.draining && this.canSend();
     // Saved before it is sent: if the window closes while the upload is out, the segment is still here next time.

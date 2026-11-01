@@ -75,3 +75,20 @@ test("editing an annotation's text sends only the text, so a queued edit can't r
   await patchPinForTest({ id: "a1", text: "new", status: "open" } as any, { status: "done" });
   expect(sent).toEqual([{ text: "new" }, { status: "done" }]);
 });
+
+test("two speech segments reach the hub oldest first even when the first upload is slow", async () => {
+  const { AudioBuffer } = await import("../src/shared/mic");
+  const rows = new Map<number, any>();
+  let n = 0;
+  const table: any = { all: async () => [...rows.values()], add: async (r: any) => (rows.set(++n, r), n), delete: async (k: number) => void rows.delete(k) };
+  const done: number[] = [];
+  const post = async (s: any) => {
+    if (s.t0 === 1) await Bun.sleep(50);
+    done.push(s.t0);
+    return "ok" as const;
+  };
+  const buf = new AudioBuffer(table, post, () => true);
+  const seg = (t0: number) => ({ deviceId: "d", t0, t1: t0 + 1, level: 1, noise: 0, wav: new ArrayBuffer(44) });
+  await Promise.all([buf.submit(seg(1)), buf.submit(seg(2))]);
+  expect(done).toEqual([1, 2]);
+});

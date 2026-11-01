@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, hub, useHub, type Person, type Share } from "./hub";
-import { activePublication, mediaAvailable, publish, receiveStats, renamePublication, screenUnavailable, stopPublishing, useWatch, usePublications } from "./rtc";
+import { activePublication, mediaAvailable, publicationStopped, publish, receiveStats, renamePublication, screenUnavailable, stopPublishing, useWatch, usePublications } from "./rtc";
 import "./share.css";
 
 const KIND_WORD = { screen: "screen", camera: "camera" } as const;
@@ -120,12 +120,20 @@ async function startShare(kind: Share["kind"], shareId?: string): Promise<Share>
   try {
     const share = await api<Share>("/shares", { deviceId: hub.deviceId, kind, shareId: pub.shareId });
     renamePublication(pub.shareId, share.id); // the hub only keeps a shareId it already knows (from a request)
+    if (publicationStopped(pub)) {
+      // Stopped while the hub was registering it: the delete that went first found nothing, so the share just made is ended now.
+      await api(`/shares/${share.id}`, undefined, "DELETE").catch(() => {});
+      throw new Error("Sharing stopped before it started.");
+    }
     return share;
   } catch (e) {
     await stopPublishing(pub.shareId, { notifyHub: false });
     throw e;
   }
 }
+
+/** For tests. */
+export const startShareForTest = startShare;
 
 export function ShareControls({ personId, kinds = ["screen", "camera"] }: { personId: string; kinds?: readonly Share["kind"][] }) {
   const { state } = useHub();

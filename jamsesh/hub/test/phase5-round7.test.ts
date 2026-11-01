@@ -530,3 +530,18 @@ test("a person's browser can't upload as the agent that shares its machine; only
   expect((await post(lap.token, "/upload", formOf(png(), { agent: a.id, title: "Posed" }))).status).toBe(403);
   expect(uploads()).toBe(before);
 });
+
+test("a replay key belongs to its caller and route: the same key from someone else runs on their own authority, the same caller still gets the replay", async () => {
+  const p = hub.session.upsertPerson({ name: "Kit" });
+  const mine = browser("Kit's laptop");
+  const other = browser("Kit's second laptop");
+  expect((await call(mine.token, "POST", "/devices", { deviceId: "d-kit", personId: p.id })).status).toBe(200);
+  const key = { "x-jam-idem": `idem-${Math.random()}`, "content-type": "application/json" };
+  const send = (token: string) => fetch(`${base}/api/settings`, { method: "POST", headers: { "x-forwarded-for": "9.9.9.9", ...key, authorization: `Bearer ${token}` }, body: JSON.stringify({ sessionName: "Kit's room" }) });
+  const first = await send(mine.token);
+  const again = await send(mine.token);
+  expect(again.headers.get("x-jam-idem-replay")).toBe("1"); // the same caller: the saved answer
+  const elsewhere = await send(other.token);
+  expect(elsewhere.headers.get("x-jam-idem-replay")).toBeNull(); // another credential: not the first caller's answer
+  expect(first.status).toBe(again.status);
+});

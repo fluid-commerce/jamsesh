@@ -156,6 +156,11 @@ async function startCapture(kind: Kind, shareId: string): Promise<PubInternal> {
   return pub;
 }
 
+/** Whether this capture has been stopped (the browser's Stop sharing, or the person), possibly while the hub was still registering it. */
+export function publicationStopped(p: Publication) {
+  return (p as PubInternal).stopped === true;
+}
+
 /** The hub assigns the final id to a share nobody requested; re-key the publication to match. */
 export function renamePublication(from: string, to: string) {
   const pub = pubs.get(from);

@@ -1613,8 +1613,10 @@ function remember(set: Set<string>, key: string, max: number) {
 }
 
 async function idempotent(hub: Hub, req: Request, path: string, run: () => Promise<Response>): Promise<Response> {
-  const key = req.headers.get("x-jam-idem");
-  if (!key || req.method === "GET" || path === "/api/audio" || key.length > 100) return run();
+  const given = req.headers.get("x-jam-idem");
+  if (!given || req.method === "GET" || path === "/api/audio" || given.length > 100) return run();
+  // The record belongs to this bearer credential, method and route (a window's rotating cookie is not part of it): the same key sent as someone else, or to another route, is a different call and runs on its own authority.
+  const key = `${new Bun.CryptoHasher("sha256").update(`${req.method}\n${path}\n${req.headers.get("authorization") ?? ""}`).digest("hex").slice(0, 16)}:${given}`;
   const now = Date.now();
   for (const [k, v] of idemSeen) {
     if (now - v.at < IDEM_TTL_MS && idemSeen.size <= 2000) break;
