@@ -220,7 +220,8 @@ export class Store {
   }
 
   saveReply(key: string, r: { status: number; type: string; body: string }): void {
-    this.db.query("INSERT OR REPLACE INTO replies (key, status, type, body, at) VALUES (?, ?, ?, ?, ?)").run(key, r.status, r.type, r.body.slice(0, 200_000), Date.now());
+    // Whole or not at all: a cut-off body would be replayed as a successful answer that isn't valid. An answer too big to keep is not kept (the retry runs the call again).
+    if (r.body.length <= 2_000_000) this.db.query("INSERT OR REPLACE INTO replies (key, status, type, body, at) VALUES (?, ?, ?, ?, ?)").run(key, r.status, r.type, r.body, Date.now());
     if (Math.random() < 0.02) this.db.query("DELETE FROM replies WHERE at < ?").run(Date.now() - REPLAY_MS);
   }
 

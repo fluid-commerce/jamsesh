@@ -1614,8 +1614,25 @@ export class Session {
    * only when the room asks). It goes to the main screen if the share may take it over; if a person's cast, lock or pin
    * holds it, to a free extra screen; with none, the room gets a note. When the share ends the screen gets back what it showed.
    */
+  /** Live shares that had no screen to go on when they started: tried again whenever a screen arrives or a lock is released, until their placement deadline. */
+  private awaitingScreen = new Set<string>();
+  retryPendingShares() {
+    for (const id of [...this.awaitingScreen]) {
+      const sh = this.store.get("shares", id);
+      if (!sh || sh.status !== "live" || this.sharesShown.has(id) || Date.now() - sh.startedAt >= Session.SHARE_PLACE_MS) {
+        this.awaitingScreen.delete(id);
+        continue;
+      }
+      if (this.shareTarget(sh)) {
+        this.awaitingScreen.delete(id);
+        this.placeShare(sh);
+      }
+    }
+  }
+
   placeShare(share: Share) {
     const target = this.shareTarget(share);
+    if (!target) this.awaitingScreen.add(share.id);
     if (!target && this.screenSeen && !this.screens().length) {
       bus.send({ type: "toast", tone: "info", text: `${share.personName} is sharing their ${share.kind}`, detail: "No big screen window is open to show it on." });
       return;
@@ -2004,7 +2021,6 @@ export class Session {
     const shape = live.map((x) => `${x.id}:${x.width}x${x.height}@${x.screenX},${x.screenY}x${x.dpr}`).sort().join("|");
     if (ids === this.liveScreens.ids && shape === this.liveScreens.shape) return;
     const idsChanged = ids !== this.liveScreens.ids;
-    const hadNone = this.liveScreens.ids === "";
     const before = new Set(this.liveScreens.ids.split("|"));
     this.liveScreens = { ids, shape };
     // A screen that just appeared or came back: what it saved is checked, and its return-to-board wait runs again.
@@ -2015,11 +2031,8 @@ export class Session {
     if (idsChanged) this.dropDeadExpanded();
     bus.changed("screens");
     if (idsChanged) bus.changed("stageTiles");
-    // The first window back after none was open, while a share was waiting for a screen: it is put up now (its own placement deadline still runs).
-    if (idsChanged && hadNone && live.length) {
-      const shown = this.shownShareIds();
-      for (const sh of this.shares()) if (sh.status === "live" && !shown.has(sh.id) && !this.sharesShown.has(sh.id) && Date.now() - sh.startedAt < Session.SHARE_PLACE_MS) this.placeShare(sh);
-    }
+    // A screen arrived while a share was waiting for one: it is put up now (its own placement deadline still runs).
+    if (idsChanged && live.length) this.retryPendingShares();
   }
 
   /** A big-screen window closed (the host app says so): it stops being a place to show things now,
@@ -2471,6 +2484,7 @@ export class Session {
     // The question is used up only once the lock is really gone: a failed write leaves it to answer again.
     this.lockQuestions.delete(screen);
     claim?.revs.set(screen, this.stageRev(screen));
+    this.retryPendingShares(); // a share waiting for this screen goes up now
     return true;
   }
 

@@ -526,3 +526,8 @@ test("a credential flag written with zsh's ANSI-C quoting is read as the shell r
   expect(credentialProblem("curl $\"--user\" alice:secret https://x.example")).not.toBeNull();
   expect(credentialProblem("echo $'hello\\nworld'")).toBeNull();
 });
+
+test("zsh's \\U escape inside $'...' is decoded, so a secret spelled with it is caught", async () => {
+  const { credentialProblem } = await import("../src/hostctl");
+  expect(credentialProblem("printf %s $'\\U00000074oken=abc123'")).not.toBeNull();
+});

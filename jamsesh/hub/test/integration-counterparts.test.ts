@@ -1178,3 +1178,32 @@ test("a share started while no big screen window was open is put up when one com
   await Bun.sleep(30);
   expect(JSON.stringify(s.stage("main"))).toContain(sh.id);
 });
+
+test("a saved reply is whole or not saved: a big answer is replayed intact, an enormous one is not kept", async () => {
+  const store = new Store(mkdtempSync(join(dir, "rp-")));
+  const big = JSON.stringify({ html: "x".repeat(600_000) });
+  store.saveReply("k1", { status: 200, type: "application/json", body: big });
+  expect(store.reply("k1")?.body).toBe(big);
+  JSON.parse(store.reply("k1")!.body); // valid JSON, not cut
+  store.saveReply("k2", { status: 200, type: "application/json", body: "y".repeat(2_000_001) });
+  expect(store.reply("k2")).toBeNull();
+});
+
+test("a share that found no usable screen is put up when a screen arrives while main is held, and when the lock is released", async () => {
+  const s = new Session(new Store(mkdtempSync(join(dir, "sh-"))));
+  const owner = s.upsertPerson({ name: "Ona" });
+  const other = s.upsertPerson({ name: "Max" });
+  s.touchDevice("dev-o", { personId: owner.id, location: "room", micOn: true, pairedId: "p-o" });
+  s.touchDevice("dev-m", { personId: other.id, location: "room", micOn: true, pairedId: "p-m" });
+  const info = { width: 1920, height: 1080, dpr: 1, screenX: 0, screenY: 0, at: Date.now() };
+  s.reportScreen("main", info);
+  // Max holds main.
+  s.holdScreen("main", { id: other.id, name: "Max" });
+  expect(s.lockOf("main")?.personId).toBe(other.id);
+  const sh = s.startShare("dev-o", "screen", undefined, undefined, "cap-1");
+  s.placeShare(sh);
+  expect(JSON.stringify(s.stage("main"))).not.toContain(sh.id);
+  s.reportScreen("screen-2", { ...info, at: Date.now() }); // another screen arrives
+  await Bun.sleep(30);
+  expect(JSON.stringify(s.stage("screen-2"))).toContain(sh.id);
+});
