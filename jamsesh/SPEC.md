@@ -1429,8 +1429,8 @@ that finds its task already done or cancelled answers 409. Replace acts on the f
 `factId` naming another is refused; with no match, a person may name one of the card's kind and workstream), and a
 Retire card only ever retires the fact it was proposed for. A context card with `needsWording` (a file with no text to
 read) can't be added, merged or used to replace until a person writes the wording (a merge whose text is only the
-placeholder or only the fact is refused). Send sends only to the card's agents still in the session and not
-observers; with none left it answers 409 and the card stays open. The client never queues these calls
+placeholder or only the fact is refused). Send goes to the card's agents only when all of them are still
+in the session and none is an observer; if any has left, or none is left, it answers 409 and the card stays open. The client never queues these calls
 while offline.
 
 **Curation and the board.** `Brain.applyCuration` passes a `CurationHold` to `applyCuration`: only a restatement (the

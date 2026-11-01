@@ -659,3 +659,25 @@ test("a mutation still running when the replay table is full is not forgotten, s
     (hub.brain as any).digest = real;
   }
 }, 60_000);
+
+test("while many answers can't be recorded, new keyed changes are refused instead of piling up", async () => {
+  const win = () => ({ cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}`, "content-type": "application/json" });
+  const real = hub.session.store.saveReply.bind(hub.session.store);
+  (hub.session.store as any).saveReply = () => {
+    throw new Error("disk full");
+  };
+  try {
+    let refused = 0;
+    for (let i = 0; i < 70; i++) {
+      const r = await fetch(`${base}/api/display`, { method: "POST", headers: { ...win(), "x-jam-idem": `pile-${Math.random()}` }, body: JSON.stringify({ width: 1, height: 1, dpr: 1 }) });
+      if (r.status === 503) refused++;
+    }
+    expect(refused).toBeGreaterThan(0);
+    expect(refused).toBeLessThan(70); // the first ones were taken in
+  } finally {
+    (hub.session.store as any).saveReply = real;
+  }
+  await Bun.sleep(2300); // the worker writes the waiting answers once storage is back
+  const ok = await fetch(`${base}/api/display`, { method: "POST", headers: { ...win(), "x-jam-idem": `after-${Math.random()}` }, body: JSON.stringify({ width: 1, height: 1, dpr: 1 }) });
+  expect(ok.status).toBe(200);
+}, 60_000);

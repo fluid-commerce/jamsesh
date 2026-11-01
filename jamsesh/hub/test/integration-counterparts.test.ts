@@ -1230,3 +1230,26 @@ test("a share waiting behind a lock that then lapses is put up when the lock let
     Session.LOCK_GONE_MS = was;
   }
 });
+
+test("a meta refresh hidden behind a quoted > or character references is removed from a quiet room's frame, other meta tags are kept", async () => {
+  const { stripMetaRefresh } = await import("../../web/src/shared/sound");
+  const cases = [
+    `<meta data-x=">" http-equiv="refresh" content="0;url=https://example.org/">`,
+    `<meta http-equiv='re&#102;resh' content='0;url=x'>`,
+    `<META\nhttp-equiv=Refresh\ncontent=0;url=x>`,
+    `<meta/http-equiv="refresh" content="1">`,
+  ];
+  for (const tag of cases) expect([tag, stripMetaRefresh(`<head>${tag}<meta charset="utf-8"></head><body>hi</body>`)]).toEqual([tag, `<head><meta charset="utf-8"></head><body>hi</body>`]);
+  expect(stripMetaRefresh(`<metadata>x</metadata><meta name="a" content="b">`)).toBe(`<metadata>x</metadata><meta name="a" content="b">`);
+});
+
+test("a share put on a cold-start main that never reports goes to the extra screen that does", async () => {
+  const s = new Session(new Store(mkdtempSync(join(dir, "sh-"))));
+  const p = s.upsertPerson({ name: "Ona" });
+  s.touchDevice("dev-1", { personId: p.id, location: "room", micOn: true, pairedId: "p-1" });
+  const sh = s.startShare("dev-1", "screen", undefined, undefined, "cap-1");
+  s.placeShare(sh); // no window has reported yet: main is where one will appear
+  s.reportScreen("screen-2", { width: 1920, height: 1080, dpr: 1, screenX: 1920, screenY: 0, at: Date.now() }); // only an extra one does
+  await Bun.sleep(30);
+  expect(JSON.stringify(s.stage("screen-2"))).toContain(sh.id);
+});

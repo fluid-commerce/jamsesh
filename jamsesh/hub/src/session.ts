@@ -1616,6 +1616,15 @@ export class Session {
    */
   /** Live shares that had no screen to go on when they started: tried again whenever a screen arrives or a lock is released, until their placement deadline. */
   private awaitingScreen = new Set<string>();
+  private pendingTries = new Map<string, number>();
+  private retryPendingSharesSafely() {
+    try {
+      this.retryPendingShares();
+    } catch {
+      // The session is closing (its database is gone): nothing to put up.
+    }
+  }
+
   retryPendingShares() {
     for (const id of [...this.awaitingScreen]) {
       const sh = this.store.get("shares", id);
@@ -1623,16 +1632,31 @@ export class Session {
         this.awaitingScreen.delete(id);
         continue;
       }
-      if (this.shareTarget(sh)) {
+      if (this.shownShareIds().has(id)) {
+        this.sharesShown.add(id);
         this.awaitingScreen.delete(id);
-        this.placeShare(sh);
+        continue;
       }
+      const target = this.shareTarget(sh);
+      // Only a screen whose window is reporting is a place to retry on (the cold-start guess at main is not), and each share is retried a few times at most: two shares can't take the screen back from each other for ever.
+      if (!target || !this.screens().some((x) => x.id === target)) continue;
+      const tries = (this.pendingTries.get(id) ?? 0) + 1;
+      this.pendingTries.set(id, tries);
+      if (tries > 3) {
+        this.awaitingScreen.delete(id);
+        continue;
+      }
+      // Already put on that very screen (it may not be reporting yet): not put there again, which would only commit the same thing in a loop.
+      const there = this.stage(target);
+      if (there.mode === "layout" && there.layout?.tiles.some((t) => t.kind === "screen" && t.shareId === id)) continue;
+      this.awaitingScreen.delete(id);
+      this.placeShare(sh);
     }
   }
 
   placeShare(share: Share) {
     const target = this.shareTarget(share);
-    if (!target) this.awaitingScreen.add(share.id);
+    this.awaitingScreen.add(share.id); // until a reporting screen is seen showing it (a placement on a cold-start main that never reports is tried again elsewhere)
     if (!target && this.screenSeen && !this.screens().length) {
       bus.send({ type: "toast", tone: "info", text: `${share.personName} is sharing their ${share.kind}`, detail: "No big screen window is open to show it on." });
       return;
@@ -2322,6 +2346,8 @@ export class Session {
       // A live app tile on this screen is driven by whoever the lock says drives.
       bus.changed("liveApps");
       this.onStageCommit?.();
+      // A change of what the screens show may have freed a screen a waiting share can go on.
+      if (this.awaitingScreen.size) queueMicrotask(() => this.retryPendingSharesSafely());
     });
     if (screen !== "main") {
       this.store.setSetting("screenStages", { ...this.store.setting<Record<string, Stage>>("screenStages", {}), [screen]: stage });
@@ -2421,7 +2447,7 @@ export class Session {
     // The lock goes together with the questions about it: all of it, or none.
     this.atomically(() => this.commitStage({ ...rest, pinned: false }, screen));
     // The screen is free: a share waiting for one goes up (after this call returns: lockOf() reads through here).
-    if (this.awaitingScreen.size) queueMicrotask(() => this.retryPendingShares());
+    if (this.awaitingScreen.size) queueMicrotask(() => this.retryPendingSharesSafely());
   }
 
   /** A person's yes to the lock question counts this long after it was asked. */

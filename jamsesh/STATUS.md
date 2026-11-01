@@ -97,7 +97,7 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Brain knows the big screen and display sizes | Tested live | It answered with the exact resolution and aspect ratio. |
 | Text-to-speech through the gateway | Tested live | `openai/tts-1`, about 3 seconds, when it was the default; the default is now `microsoft/mai-voice-2.1`, not yet timed on this row. Falls back to macOS `say`. |
 | Arranging windows, listing windows, preview builds on the host | Not tested | Built; needs the Accessibility and Automation permissions granted on the host. |
-| Agents asking the host to build their branch | Not built | Waiting on a decision: it lets any paired agent run commands on the host. |
+| Agents asking the host to build their branch | Simulated | Built (`jam_host_preview`, the approval queue, a person's decision on the card or by voice); a command or build waits for a person's approval. Tests drive the real hub; not exercised with a real build on a Mac yet. |
 
 ## Audio
 
@@ -151,7 +151,7 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 |---|---|---|
 | Record on your own screen: rainbow trail, notes pinned where you pointed, tidy list, send to owning agents | Simulated | Headless Chromium against a throwaway hub with injected, timestamped utterances (no audio played); trail frames mid-motion, the tidy list, the sent toast and the pins in the picture viewer were looked at. |
 | Rainbow trail with reduced motion | Simulated | Frame checked with `prefers-reduced-motion`: shorter, thinner, fainter. Frame rate on a real Retina display not measured. |
-| Record on the big screen: lock taken and given back, refused when someone else drives, each driver recorded, trail and chip on the screen | Simulated | Two headless windows (driver and big screen) with a stand-in for the dart bridge; 6.1's real dart not connected yet. |
+| Record on the big screen: lock taken and given back, refused when someone else drives, each driver recorded, trail and chip on the screen | Simulated | Two headless windows (driver and big screen) with a stand-in for the dart bridge; the real dart bridge is connected through the host app's subscription; not exercised against a real big screen yet. |
 | Note alignment (pauses, edges, splitting a long line, several drivers) | Simulated | Unit tests of the timing rules. Not tuned against real speech timing. |
 | Tidy then send through the web client's own `api()` | Simulated | Real hub over HTTP; a lost reply and a repeat send checked. |
 | Each line in one recording only (the bound is written on the recording by the next Start, so it holds when the next recording is replaced or ended during the wait); a send is never repeated, even after a part-way failure (directive and event are one keyed write), a changed retry is refused, and a Start in flight when the page closes is cancelled by its token (both orders); a close the page can't confirm is recovered from the hub's stored outcome, and words and typed text of a close that is overtaken go to the room | Simulated | `hub/test/record.test.ts`: a restart 100 ms into the previous Stop's wait, that restart replaced and stopped before the wait ends, a send that fails after its first directive and is retried (one directive each, one pin each), a line from before Start, 200+ stopped recordings then a retried send (404, nothing sent twice), cancel during a Stop (including a failing read), and a paired window being only its own person. The older prompt-window routes are retired. |

@@ -1626,7 +1626,23 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
 // including calls whose response was lost on the way back. A repeated key gets the first
 // answer again instead of running twice; one that arrives mid-flight waits for the first.
 const IDEM_TTL_MS = 24 * 60 * 60_000;
-const unsavedReplies = new Set<string>();
+const unsaved = new Map<string, { status: number; body: string; type: string }>();
+let replayWorker: ReturnType<typeof setInterval> | null = null;
+function startReplayWorker(hub: Hub) {
+  replayWorker ??= setInterval(() => {
+    for (const [k, r] of unsaved) {
+      try {
+        if (!hub.session.store.saveReply(k, r)) hub.session.store.saveReply(k, { status: r.status, type: "application/json", body: JSON.stringify({ ok: true, replayed: true, note: "The change was made; its full answer was too large to keep." }) });
+        unsaved.delete(k);
+      } catch {
+        break; // still failing: try again next round
+      }
+    }
+    if (!unsaved.size && replayWorker) (clearInterval(replayWorker), (replayWorker = null));
+  }, 2000);
+  replayWorker.unref?.();
+}
+const MAX_UNSAVED = 50;
 const idemSeen = new Map<string, { at: number; pending: boolean; done: Promise<{ status: number; body: string; type: string }> }>();
 const recentSegments = new Set<string>();
 const segmentsInFlight = new Set<string>();
@@ -1644,7 +1660,7 @@ async function idempotent(hub: Hub, req: Request, path: string, scope: string, r
   const now = Date.now();
   for (const [k, v] of idemSeen) {
     if (now - v.at < IDEM_TTL_MS && idemSeen.size <= 2000) break;
-    if (!v.pending && !unsavedReplies.has(k)) idemSeen.delete(k); // a call still running, or an answer whose record couldn't be written, stays
+    if (!v.pending && !unsaved.has(k)) idemSeen.delete(k); // a call still running, or an answer whose record couldn't be written, stays
   }
   // Answered before a restart: replay it from the database.
   const saved = idemSeen.has(key) ? null : hub.session.store.reply(key);
@@ -1654,6 +1670,8 @@ async function idempotent(hub: Hub, req: Request, path: string, scope: string, r
     const r = await seen.done;
     return new Response(r.body, { status: r.status, headers: { "content-type": r.type, "x-jam-idem-replay": "1" } });
   }
+  // Many answers that couldn't be recorded: nothing new is taken in until they are, so none can be repeated.
+  if (unsaved.size >= MAX_UNSAVED) return new Response(JSON.stringify({ error: "The hub can't record changes right now. Try again in a moment." }), { status: 503, headers: { "content-type": "application/json", "retry-after": "3" } });
   let settle!: (r: { status: number; body: string; type: string }) => void;
   idemSeen.set(key, { at: now, pending: true, done: new Promise((res) => (settle = res)) });
   try {
@@ -1665,35 +1683,20 @@ async function idempotent(hub: Hub, req: Request, path: string, scope: string, r
     if (res.status >= 500 || res.status === 408) idemSeen.delete(key);
     else {
       try {
-        // Too big to keep in the database: held in memory (pinned, a few at most) so the retry of a lost reply still gets it, not a second run.
-        if (!hub.session.store.saveReply(key, reply)) {
-          unsavedReplies.add(key);
-          while (unsavedReplies.size > 100) {
-            const old = unsavedReplies.values().next().value!;
-            unsavedReplies.delete(old);
-            idemSeen.delete(old);
-          }
-        }
+        // Too big to keep: a short answer is kept instead (the change was made), so a retry never runs it again and nothing large is held.
+        if (!hub.session.store.saveReply(key, reply)) hub.session.store.saveReply(key, { status: reply.status, type: "application/json", body: JSON.stringify({ ok: true, replayed: true, note: "The change was made; its full answer was too large to keep." }) });
       } catch (e) {
-        // The change was made; only the note of its answer failed. The answer stays in memory (a retry gets it, not a second run) and the write is tried again.
+        // The change was made; only the note of its answer failed. It stays in memory (a retry gets it, not a second run) and one worker writes it again; while many are waiting, new changes are refused.
         console.error("replay record:", e instanceof Error ? e.message : e);
-        unsavedReplies.add(key); // pinned in memory until the write succeeds: the retry of a lost reply is answered, not run again
-        const again = () => {
-          try {
-            hub.session.store.saveReply(key, reply);
-            unsavedReplies.delete(key);
-          } catch {
-            setTimeout(again, 2000).unref?.();
-          }
-        };
-        setTimeout(again, 2000).unref?.();
+        unsaved.set(key, reply);
+        startReplayWorker(hub);
       }
     }
     const entry = idemSeen.get(key);
     if (entry) entry.pending = false;
     settle(reply);
     // Written: the database answers any later retry, so memory lets go of it (a failed write keeps it, above).
-    if (!unsavedReplies.has(key) && res.status < 500 && res.status !== 408) idemSeen.delete(key);
+    if (!unsaved.has(key) && res.status < 500 && res.status !== 408) idemSeen.delete(key);
     return res;
   } catch (e) {
     idemSeen.delete(key);

@@ -80,10 +80,41 @@ function decodeEntities(t: string): string {
     .replace(/[\t\n\r]/g, "");
 }
 
+/** Removes `<meta http-equiv=refresh>` tags. A tag is read the way a browser reads it: quotes can hold a `>`, and character references in the attribute count. */
+export function stripMetaRefresh(doc: string): string {
+  let out = "";
+  let at = 0;
+  const lower = doc.toLowerCase();
+  for (;;) {
+    const i = lower.indexOf("<meta", at);
+    if (i < 0 || !/[\s/>]/.test(doc[i + 5] ?? ">")) {
+      if (i >= 0) {
+        out += doc.slice(at, i + 5);
+        at = i + 5;
+        continue;
+      }
+      return out + doc.slice(at);
+    }
+    let j = i + 5;
+    let quote = "";
+    for (; j < doc.length; j++) {
+      const c = doc[j];
+      if (quote) {
+        if (c === quote) quote = "";
+      } else if (c === '"' || c === "'") quote = c;
+      else if (c === ">") break;
+    }
+    const tag = doc.slice(i, j + 1);
+    out += doc.slice(at, i) + (/http-equiv\s*=\s*["']?\s*refresh/i.test(decodeEntities(tag)) ? "" : tag);
+    at = j + 1;
+    if (j >= doc.length) return out;
+  }
+}
+
 export function htmlFrame(silent: boolean, doc: string): { srcDoc: string; sandbox: string } {
   if (!silent) return { srcDoc: doc, sandbox: "allow-scripts" };
-  // A meta refresh navigates the frame without a click or a script, to a document that would not carry this policy: it is removed.
-  doc = doc.replace(/<meta\b[^>]*>/gi, (tag) => (/http-equiv\s*=\s*["']?\s*refresh/i.test(decodeEntities(tag)) ? "" : tag));
+  // A meta refresh navigates the frame without a click or a script, to a document that would not carry this policy: every meta tag that is one is removed.
+  doc = stripMetaRefresh(doc);
   const meta = `<meta http-equiv="Content-Security-Policy" content="${QUIET_CSP}"><base target="_blank">`;
   const at = doc.search(/<!doctype html>/i);
   const srcDoc = at === 0 ? doc.replace(/^<!doctype html>/i, (m) => m + meta) : meta + doc;
