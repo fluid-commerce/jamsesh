@@ -1555,7 +1555,7 @@ export class Session {
   }
 
   /** A device starts sharing, on its own or in answer to a request. */
-  startShare(deviceId: string, kind: Share["kind"], shareId?: string, label?: string): Share {
+  startShare(deviceId: string, kind: Share["kind"], shareId?: string, label?: string, clientId?: string): Share {
     const device = this.store.get("devices", deviceId);
     const person = this.person(device?.personId);
     // An id is this device's own share, or a request made to its person; any other id starts a new share.
@@ -1583,7 +1583,7 @@ export class Session {
       status: "live",
       reason: existing?.reason ?? "",
       startedAt: Date.now(),
-      ...(shareId && !existing && /^[\w-]{1,64}$/.test(shareId) ? { clientId: shareId } : {}),
+      ...(clientId && /^[\w-]{1,64}$/.test(clientId) ? { clientId } : {}), // this capture attempt's own id, whether it answers a request or starts on its own
     };
     this.store.put("shares", share);
     this.store.addEvent({ kind: "system", authorType: "person", authorId: share.personId, authorName: share.personName, text: `${share.personName} is sharing their ${kind}.`, data: { shareId: share.id } });

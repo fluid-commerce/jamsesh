@@ -170,7 +170,7 @@ test("a share registration whose reply was lost is ended afterwards, not left on
   globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
     calls.push(`${init.method ?? "GET"} ${url}`);
     if (init.method === "POST" && url.endsWith("/api/shares")) {
-      sentId = JSON.parse(String(init.body)).shareId; // the hub got it, under the id this window gave; the answer never arrived
+      sentId = JSON.parse(String(init.body)).clientId; // the hub got it, under this attempt's own id; the answer never arrived
       throw new Error("reply lost");
     }
     if (url.endsWith("/api/state")) return Response.json({ shares: [{ id: "sh-orphan", deviceId: hub.deviceId, kind: "camera", status: "live", clientId: sentId }, { id: "sh-other-window", deviceId: hub.deviceId, kind: "camera", status: "live", clientId: "sh-someone-elses" }] });
@@ -181,6 +181,39 @@ test("a share registration whose reply was lost is ended afterwards, not left on
     await expect(startShareForTest("camera")).rejects.toThrow();
     expect(calls).toContain("DELETE /api/shares/sh-orphan");
     expect(calls).not.toContain("DELETE /api/shares/sh-other-window"); // another window's cast on the same device is not touched
+  } finally {
+    globalThis.fetch = realFetch;
+    Object.defineProperty(globalThis.navigator, "mediaDevices", { value: media, configurable: true });
+  }
+});
+
+test("a lost reply for an ACCEPTED request is cleaned up too, and a failed first read of the state is retried", async () => {
+  const fake = fakeStream();
+  const media = (globalThis.navigator as any).mediaDevices;
+  Object.defineProperty(globalThis.navigator, "mediaDevices", { value: { getUserMedia: async () => fake.stream, getDisplayMedia: async () => fake.stream }, configurable: true });
+  const calls: string[] = [];
+  const realFetch = globalThis.fetch;
+  let sentId = "";
+  let stateReads = 0;
+  globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
+    calls.push(`${init.method ?? "GET"} ${url}`);
+    if (init.method === "POST" && url.endsWith("/api/shares")) {
+      const b = JSON.parse(String(init.body));
+      expect(b.shareId).toBe("sh-request"); // answering a request the hub already knows
+      sentId = b.clientId;
+      throw new Error("reply lost");
+    }
+    if (url.endsWith("/api/state")) {
+      if (++stateReads === 1) throw new Error("state read failed");
+      return Response.json({ shares: [{ id: "sh-request", deviceId: "d", kind: "camera", status: "live", clientId: sentId }] });
+    }
+    return new Response("{}");
+  }) as any;
+  try {
+    const { startShareForTest } = await import("../src/shared/share");
+    await expect(startShareForTest("camera", "sh-request")).rejects.toThrow();
+    expect(stateReads).toBe(2);
+    expect(calls).toContain("DELETE /api/shares/sh-request");
   } finally {
     globalThis.fetch = realFetch;
     Object.defineProperty(globalThis.navigator, "mediaDevices", { value: media, configurable: true });

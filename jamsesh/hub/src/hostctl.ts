@@ -257,7 +257,31 @@ export function shellCommands(text: string, o: { comments?: boolean } = {}): str
   };
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
-    if (c === "'") {
+    if (c === "$" && text[i + 1] === "'") {
+      // zsh/bash ANSI-C quoting: $'ser' is the word "ser", and \x75 inside it is a letter; read it the way the shell does.
+      let j = i + 2;
+      let word = "";
+      for (; j < text.length && text[j] !== "'"; j++) {
+        if (text[j] !== "\\" || j + 1 >= text.length) {
+          word += text[j];
+          continue;
+        }
+        const n = text[++j];
+        const hex = /^x([0-9a-fA-F]{1,2})/.exec(text.slice(j));
+        const uni = /^u([0-9a-fA-F]{1,4})/.exec(text.slice(j));
+        const oct = /^([0-7]{1,3})/.exec(text.slice(j));
+        if (hex) (word += String.fromCharCode(parseInt(hex[1], 16))), (j += hex[0].length - 1);
+        else if (uni) (word += String.fromCharCode(parseInt(uni[1], 16))), (j += uni[0].length - 1);
+        else if (oct) (word += String.fromCharCode(parseInt(oct[1], 8))), (j += oct[0].length - 1);
+        else word += ({ n: "\n", t: "\t", r: "\r", a: "\x07", b: "\b", e: "\x1b", f: "\f", v: "\v" } as Record<string, string>)[n] ?? n;
+      }
+      cur += word;
+      has = true;
+      i = j;
+    } else if (c === "$" && text[i + 1] === '"') {
+      // $"..." is a double-quoted word with a translation hint: the same as "...".
+      continue;
+    } else if (c === "'") {
       const j = text.indexOf("'", i + 1);
       cur += text.slice(i + 1, j < 0 ? text.length : j);
       has = true;

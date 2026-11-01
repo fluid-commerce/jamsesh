@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, hub, useHub, type Person, type Share } from "./hub";
 import { getIdentity } from "./identity";
+import { uuid } from "./offline";
 import { activePublication, localPublication, mediaAvailable, publicationStopped, publish, receiveStats, renamePublication, screenUnavailable, stopPublishing, useWatch, usePublications } from "./rtc";
 import "./share.css";
 
@@ -118,8 +119,9 @@ async function startShare(kind: Share["kind"], shareId?: string): Promise<Share>
   const running = activePublication(kind);
   if (running) return api<Share>("/shares", { deviceId: hub.deviceId, kind, shareId: running.shareId });
   const pub = await publish(kind, shareId);
+  const clientId = `cap-${uuid()}`; // this attempt's own id, apart from a request's: the hub stores it, so a registration whose reply is lost can be found and ended by this window alone
   try {
-    const share = await api<Share>("/shares", { deviceId: hub.deviceId, kind, shareId: pub.shareId });
+    const share = await api<Share>("/shares", { deviceId: hub.deviceId, kind, shareId: pub.shareId, clientId });
     renamePublication(pub.shareId, share.id); // the hub only keeps a shareId it already knows (from a request)
     if (publicationStopped(pub)) {
       // Stopped while the hub was registering it: the delete that went first found nothing, so the share just made is ended now.
@@ -129,17 +131,22 @@ async function startShare(kind: Share["kind"], shareId?: string): Promise<Share>
     return share;
   } catch (e) {
     await stopPublishing(pub.shareId, { notifyHub: false });
-    await endStrayShares(kind, pub.shareId); // the hub may have registered it though its reply was lost
+    await endStrayShares(clientId); // the hub may have registered it though its reply was lost
     throw e;
   }
 }
 
-/** The share the hub registered for this capture (found by the id this window gave it) though its reply was lost: ended. Nothing else is touched, not even another window's share on the same device. */
-async function endStrayShares(_kind: Share["kind"], clientId: string) {
-  try {
-    const st = await api<{ shares?: Share[] }>("/state");
-    for (const sh of st.shares ?? []) if (sh.clientId === clientId && (sh.status === "live" || sh.status === "requested")) await api(`/shares/${sh.id}`, undefined, "DELETE").catch(() => {});
-  } catch {}
+/** The share the hub registered for this capture attempt (found by its id) though the reply was lost: ended. The read is retried, since the cleanup is the only thing standing between a dead tile and the stage. Nothing else is touched, not even another window's share on the same device. */
+async function endStrayShares(clientId: string) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      const st = await api<{ shares?: Share[] }>("/state");
+      for (const sh of st.shares ?? []) if (sh.clientId === clientId && (sh.status === "live" || sh.status === "requested")) await api(`/shares/${sh.id}`, undefined, "DELETE").catch(() => {});
+      return;
+    } catch {
+      await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+    }
+  }
 }
 
 /** For tests. */

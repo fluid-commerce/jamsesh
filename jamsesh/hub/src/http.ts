@@ -1368,7 +1368,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     // A share someone ended stays ended: its window re-registering it (after missing the end) is told so and stops.
     const was = typeof body.shareId === "string" ? s.store.get("shares", body.shareId) : undefined;
     if (was && was.deviceId === String(body.deviceId) && (was.status === "ended" || was.status === "declined") && !was.lost) return bad("That share was ended.", 409);
-    const share = s.startShare(String(body.deviceId), body.kind === "camera" ? "camera" : "screen", typeof body.shareId === "string" ? body.shareId : undefined, body.label);
+    const share = s.startShare(String(body.deviceId), body.kind === "camera" ? "camera" : "screen", typeof body.shareId === "string" ? body.shareId : undefined, body.label, typeof body.clientId === "string" ? body.clientId : undefined);
     s.placeShare(share);
     return json(share);
   }

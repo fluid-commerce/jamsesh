@@ -1130,10 +1130,14 @@ test("a refresh spelled with character references is still removed from a quiet 
   }
 });
 
-test("a share started with a client id keeps it, so that window alone can find it again", async () => {
+test("a share keeps the id of the capture attempt that registered it, for a new share and for an accepted request", async () => {
   const s = new Session(new Store(mkdtempSync(join(dir, "sh-"))));
   const p = s.upsertPerson({ name: "Ona" });
   s.touchDevice("dev-1", { personId: p.id, location: "room", micOn: true, pairedId: "host" });
-  const sh = s.startShare("dev-1", "camera", "sh-window-1");
-  expect(sh.clientId).toBe("sh-window-1");
+  expect(s.startShare("dev-1", "camera", "sh-window-1", undefined, "cap-1").clientId).toBe("cap-1");
+  const asked = s.requestShare(p.id, "screen", "the build", "Host");
+  expect(asked).toBeTruthy();
+  const accepted = s.startShare("dev-1", "screen", asked!.id, undefined, "cap-2");
+  expect(accepted.id).toBe(asked!.id);
+  expect(accepted.clientId).toBe("cap-2");
 });
