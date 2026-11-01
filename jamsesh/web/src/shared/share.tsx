@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, hub, useHub, type Person, type Share } from "./hub";
-import { activePublication, mediaAvailable, publicationStopped, publish, receiveStats, renamePublication, screenUnavailable, stopPublishing, useWatch, usePublications } from "./rtc";
+import { getIdentity } from "./identity";
+import { activePublication, localPublication, mediaAvailable, publicationStopped, publish, receiveStats, renamePublication, screenUnavailable, stopPublishing, useWatch, usePublications } from "./rtc";
 import "./share.css";
 
 const KIND_WORD = { screen: "screen", camera: "camera" } as const;
@@ -128,8 +129,17 @@ async function startShare(kind: Share["kind"], shareId?: string): Promise<Share>
     return share;
   } catch (e) {
     await stopPublishing(pub.shareId, { notifyHub: false });
+    await endStrayShares(kind); // the hub may have registered it though its reply was lost
     throw e;
   }
+}
+
+/** A share of this kind from this window that the hub lists but nothing here is capturing for (a registration whose reply never arrived): ended. */
+async function endStrayShares(kind: Share["kind"]) {
+  try {
+    const st = await api<{ shares?: Share[] }>("/state");
+    for (const sh of st.shares ?? []) if (sh.deviceId === hub.deviceId && sh.kind === kind && sh.status === "live" && !localPublication(sh.id)) await api(`/shares/${sh.id}`, undefined, "DELETE").catch(() => {});
+  } catch {}
 }
 
 /** For tests. */
@@ -247,6 +257,15 @@ export function waitingRequests(queue: Request[], shares: Share[], now = Date.no
   return next.length === queue.length && next.every((r, i) => r === queue[i]) ? queue : next;
 }
 
+/** Requests the state lists as waiting for this person that the queue doesn't hold yet (the one-time message was missed while disconnected or reloading). */
+const answered = new Set<string>();
+export function missedRequests(queue: Request[], shares: Share[], personId: string, now = Date.now()): Request[] {
+  if (!personId) return [];
+  return shares
+    .filter((s) => s.status === "requested" && s.personId === personId && !answered.has(s.id) && !queue.some((r) => r.shareId === s.id))
+    .map((s) => ({ shareId: s.id, kind: s.kind, reason: s.reason, by: "the host", at: now, listed: true }));
+}
+
 export function ShareRequestPrompt() {
   const { state } = useHub();
   const [queue, setQueue] = useState<Request[]>([]);
@@ -268,7 +287,11 @@ export function ShareRequestPrompt() {
   // one the state never listed, once it has had time to.
   useEffect(() => {
     if (!state) return;
-    setQueue((q) => waitingRequests(q, state.shares));
+    const me = getIdentity().personId;
+    setQueue((q) => {
+      const missed = missedRequests(q, state.shares, me);
+      return waitingRequests(missed.length ? [...q, ...missed] : q, state.shares);
+    });
     if (!queue.some((r) => !r.listed)) return;
     const t = setTimeout(() => setQueue((q) => waitingRequests(q, state.shares)), UNLISTED_MS);
     return () => clearTimeout(t);
@@ -282,6 +305,7 @@ export function ShareRequestPrompt() {
 
   const decline = useCallback(() => {
     if (!req) return;
+    answered.add(req.shareId); // the state may list it a moment longer: it isn't asked again
     api(`/shares/${req.shareId}/decline`, {}).catch(() => {});
     pop();
   }, [req, pop]);
@@ -291,6 +315,7 @@ export function ShareRequestPrompt() {
     setBusy(true);
     setError(null);
     try {
+      answered.add(req.shareId);
       await startShare(req.kind, req.shareId);
       // One yes answers every waiting request for the same thing.
       setQueue((q) => q.filter((r) => r.kind !== req.kind));

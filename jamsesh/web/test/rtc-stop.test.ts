@@ -158,3 +158,26 @@ test("stopping a share while the hub is still registering it ends the share the 
     Object.defineProperty(globalThis.navigator, "mediaDevices", { value: media, configurable: true });
   }
 });
+
+test("a share registration whose reply was lost is ended afterwards, not left on the stage with nothing streaming", async () => {
+  const fake = fakeStream();
+  const media = (globalThis.navigator as any).mediaDevices;
+  Object.defineProperty(globalThis.navigator, "mediaDevices", { value: { getUserMedia: async () => fake.stream, getDisplayMedia: async () => fake.stream }, configurable: true });
+  const calls: string[] = [];
+  const realFetch = globalThis.fetch;
+  const { hub } = await import("../src/shared/hub");
+  globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
+    calls.push(`${init.method ?? "GET"} ${url}`);
+    if (init.method === "POST" && url.endsWith("/api/shares")) throw new Error("reply lost"); // the hub got it; the answer never arrived
+    if (url.endsWith("/api/state")) return Response.json({ shares: [{ id: "sh-orphan", deviceId: hub.deviceId, kind: "camera", status: "live" }] });
+    return new Response("{}");
+  }) as any;
+  try {
+    const { startShareForTest } = await import("../src/shared/share");
+    await expect(startShareForTest("camera")).rejects.toThrow();
+    expect(calls).toContain("DELETE /api/shares/sh-orphan");
+  } finally {
+    globalThis.fetch = realFetch;
+    Object.defineProperty(globalThis.navigator, "mediaDevices", { value: media, configurable: true });
+  }
+});

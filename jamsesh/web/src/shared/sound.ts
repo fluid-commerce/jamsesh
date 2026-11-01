@@ -73,6 +73,8 @@ export const QUIET_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src
 
 export function htmlFrame(silent: boolean, doc: string): { srcDoc: string; sandbox: string } {
   if (!silent) return { srcDoc: doc, sandbox: "allow-scripts" };
+  // A meta refresh navigates the frame without a click or a script, to a document that would not carry this policy: it is removed.
+  doc = doc.replace(/<meta\b[^>]*http-equiv\s*=\s*["']?\s*refresh[^>]*>/gi, "");
   const meta = `<meta http-equiv="Content-Security-Policy" content="${QUIET_CSP}"><base target="_blank">`;
   const at = doc.search(/<!doctype html>/i);
   const srcDoc = at === 0 ? doc.replace(/^<!doctype html>/i, (m) => m + meta) : meta + doc;

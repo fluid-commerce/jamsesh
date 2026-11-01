@@ -154,14 +154,14 @@ function ssdp(timeoutMs = 2500): Promise<string[]> {
   });
 }
 
-export async function soap(igd: Igd, action: string, args: Record<string, string | number>) {
+export async function soap(igd: Igd, action: string, args: Record<string, string | number>, timeoutMs = 5000) {
   const body = Object.entries(args).map(([k, v]) => `<${k}>${v}</${k}>`).join("");
   const res = await fetch(igd.control, {
     redirect: "error",
     method: "POST",
     headers: { "content-type": 'text/xml; charset="utf-8"', soapaction: `"${igd.type}#${action}"` },
     body: `<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:${action} xmlns:u="${igd.type}">${body}</u:${action}></s:Body></s:Envelope>`,
-    signal: AbortSignal.timeout(5000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const text = await res.text();
   const err = text.match(/<errorCode>(\d+)<\/errorCode>/)?.[1];
@@ -367,7 +367,7 @@ export class PortMapper {
           const r = raw && decodeNatPmp(raw);
           if (r && r.kind === "map" && r.result === 0) return true;
         } else if (c.method === "upnp" && this.igd) {
-          const r = await soap(this.igd, "DeletePortMapping", { NewRemoteHost: "", NewExternalPort: c.externalPort, NewProtocol: "TCP" });
+          const r = await soap(this.igd, "DeletePortMapping", { NewRemoteHost: "", NewExternalPort: c.externalPort, NewProtocol: "TCP" }, 3000); // three tries fit the hub's 12 s shutdown budget
           if (r.ok || r.errorCode === 714) return true; // 714: there is no such mapping any more
         } else return true; // a manual rule or none: nothing of ours to remove
       } catch {}

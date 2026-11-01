@@ -1076,3 +1076,48 @@ test("a canvas pin is a FigCraft comment only once FigCraft has confirmed it: an
     hub.stop();
   }
 });
+
+test("two deliveries of one canvas pin at once make one FigCraft comment", async () => {
+  process.env.JAMSESH_SILENT = "1";
+  const { Hub } = await import("../src/hub");
+  const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "canvas-comments-2"), teamDir: join(dir, "team-cc2") });
+  try {
+    clearInterval((hub.brain as any).digestTimer);
+    const pin = hub.session.addAnnotation({ personId: null, authorName: "Mo", target: { kind: "canvas", ref: "F", label: "F", canvasX: 1, canvasY: 2 }, x: 0.1, y: 0.1, text: "x", source: "pin" } as any);
+    let calls = 0;
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    (hub.canvas as any).comment = async () => (calls++, await held, true);
+    const both = Promise.all([hub.deliverComment(pin.id), hub.flushComments(), hub.deliverComment(pin.id)]);
+    await Bun.sleep(30);
+    release();
+    await both;
+    expect(calls).toBe(1);
+  } finally {
+    hub.devproxy.stop();
+    hub.stop();
+  }
+});
+
+test("shutdown asks the router to delete the forward at once, not behind a setup that is waiting in the lane", async () => {
+  const { Network } = await import("../src/net");
+  const n = new Network(join(dir, "net-close-now"), (async () => new Response("OK\n1.2.3.4\n\nUPDATED")) as any);
+  const calls: string[] = [];
+  (n as any).mapper = { map: async () => ({ method: "upnp" }), unmap: async () => (calls.push("unmap"), true) };
+  (n as any).cfg = { domain: "x.duckdns.org", token: "00000000-0000-0000-0000-000000000000", externalPort: 443, internalPort: 4443, enabled: true, staging: false };
+  let release!: () => void;
+  (n as any).lane = new Promise<void>((r) => (release = r)); // a configuration call holding the lane
+  const gone = await Promise.race([n.close(), Bun.sleep(1000).then(() => "stuck")]);
+  expect(gone).toBe(true);
+  expect(calls).toEqual(["unmap"]);
+  release();
+});
+
+test("a quiet room's HTML frame has any meta refresh removed", async () => {
+  const { htmlFrame } = await import("../../web/src/shared/sound");
+  const doc = `<!doctype html><html><head><META http-equiv="Refresh" content="0;url=https://example.com/x.mp3"></head><body>hi</body></html>`;
+  const quiet = htmlFrame(true, doc);
+  expect(quiet.srcDoc.toLowerCase()).not.toContain("refresh");
+  expect(quiet.srcDoc).toContain("Content-Security-Policy");
+  expect(htmlFrame(false, doc).srcDoc).toContain("Refresh"); // a normal room is left as authored
+});

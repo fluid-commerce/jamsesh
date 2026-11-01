@@ -127,11 +127,10 @@ export class Network {
   async close(): Promise<boolean> {
     this.shut = true;
     this.cfgGen++; // any setup still waiting is stale
-    return this.inLane(async () => {
-      const gone = await this.stop();
-      this.certChanged.forEach((cb) => cb()); // the HTTPS listener and the announcement end
-      return gone;
-    });
+    // Not queued behind a setup or turn-off in the lane: the router is asked at once (stop() waits only for a mapping in flight).
+    const gone = await this.stop();
+    this.certChanged.forEach((cb) => cb()); // the HTTPS listener and the announcement end
+    return gone;
   }
 
   /** Turns everything off. True when the router confirmed the port forward is gone (or there was none). */

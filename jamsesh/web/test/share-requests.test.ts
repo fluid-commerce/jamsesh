@@ -31,3 +31,16 @@ test("an unchanged queue is the same array, so the prompt doesn't re-render", ()
   const q = [req("a", 0, true)];
   expect(waitingRequests(q, [share("a", "requested")], 1)).toBe(q);
 });
+
+test("a request the state lists for this person is asked again after a reload, once; one already answered is not", async () => {
+  const { missedRequests } = await import("../src/shared/share");
+  const shares: any[] = [
+    { id: "sh1", personId: "p1", kind: "screen", status: "requested", reason: "the build", deviceId: "d", personName: "A", label: "", startedAt: 1 },
+    { id: "sh2", personId: "p2", kind: "camera", status: "requested", reason: "", deviceId: "d", personName: "B", label: "", startedAt: 1 },
+    { id: "sh3", personId: "p1", kind: "camera", status: "live", reason: "", deviceId: "d", personName: "A", label: "", startedAt: 1 },
+  ];
+  const got = missedRequests([], shares, "p1");
+  expect(got.map((r) => r.shareId)).toEqual(["sh1"]); // only a request for this person, only one still waiting
+  expect(missedRequests(got, shares, "p1")).toEqual([]); // already in the queue
+  expect(missedRequests([], shares, "")).toEqual([]);
+});

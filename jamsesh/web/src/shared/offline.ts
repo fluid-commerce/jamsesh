@@ -410,7 +410,9 @@ export class Outbox {
           const r = await this.d.send(e);
           if (r.kind === "retry") {
             if (r.server && ++e.serverFails >= SERVER_FAIL_LIMIT) {
-              await this.remove(e, "dropped");
+              // A call the hub keeps failing on stays saved (its retention is days, not six tries) and is tried again later; the ones behind it go first.
+              skipped.add(e);
+              mismatched = true;
               continue;
             }
             this.schedule();
