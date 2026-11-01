@@ -2,7 +2,7 @@
 // every change after it. Components read it through useHub().
 import { useSyncExternalStore } from "react";
 import { currentHostKey, isHostConfirmed, readDeviceId, readPref, writePref } from "./identity";
-import { hostVerified, markContact, onContact, outbox, uuid } from "./offline";
+import { hostVerified, markContact, recheckHost, onContact, outbox, uuid } from "./offline";
 import type { BusMessage, HubState, JamEvent, Stage, Utterance } from "../../../hub/src/types";
 
 export type { HubState, JamEvent, Stage, Utterance };
@@ -169,6 +169,7 @@ class HubClient {
       this.status("connected");
       this.startHeartbeat();
       this.syncClock();
+      void recheckHost(); // a relay that moved to another host reloads this page rather than letting it adopt that host's state
       // The hub sends {type:"state"} on open; if it somehow doesn't, fetch it.
       this.clear("state");
       this.timers.state = window.setTimeout(() => this.refreshState().catch(() => {}), 2500);

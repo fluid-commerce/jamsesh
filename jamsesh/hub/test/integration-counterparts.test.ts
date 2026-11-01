@@ -974,3 +974,52 @@ test("a speech segment whose acknowledgement was lost is not taken in twice afte
   b.hub.devproxy.stop();
   b.hub.stop();
 });
+
+test("what an agent asks of the brain becomes a card for a person: no directive and no pairing is made by the agent's message", async () => {
+  process.env.JAMSESH_SILENT = "1";
+  const { Hub } = await import("../src/hub");
+  const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "agent-cards"), teamDir: join(dir, "team-ac") });
+  try {
+    clearInterval((hub.brain as any).digestTimer);
+    const s = hub.session;
+    const a = s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "acme/web", cwd: "/a", machine: "m", platform: "desktop" }).agent;
+    const b = s.registerAgent({ ownerName: "Ana", harness: "claude-code", repo: "acme/api", cwd: "/b", machine: "m2", platform: "desktop" }).agent;
+    const ev: any = s.store.addEvent({ kind: "message", authorType: "agent", authorId: a.id, authorName: a.name, text: "please have the api agent add the field", relevance: "work", data: {} });
+    const tools = (hub.brain as any).tools([ev], { effects: 0 }, "agent"); // the route is left out: an agent never gets the direct one
+    const made = await tools.create_directive.execute({ targets: [b.id], text: "Add the field", mode: "implement", rationale: "x" }, { toolCallId: "1", messages: [] });
+    expect(String(made)).toContain("Tasks board");
+    expect(s.directives().filter((d) => d.mode === "implement").length).toBe(0);
+    expect(s.board.open().length).toBeGreaterThan(0);
+    expect(tools.triage_card).toBeUndefined();
+  } finally {
+    hub.devproxy.stop();
+    hub.stop();
+  }
+});
+
+test("jam_inbox marks items read only once its reply has been sent: a dropped reply leaves them for the next call", async () => {
+  process.env.JAMSESH_SILENT = "1";
+  const { Hub } = await import("../src/hub");
+  const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "inbox-sent"), teamDir: join(dir, "team-is") });
+  try {
+    clearInterval((hub.brain as any).digestTimer);
+    const s = hub.session;
+    const a = s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "acme/web", cwd: "/a", machine: "m", platform: "desktop" }).agent;
+    s.createDirective({ text: "Fix the footer", mode: "implement", targets: [a.id], requestedBy: "Chey" });
+    const ctx: any = { agentId: a.id, ip: "relayed", device: "m", origin: "http://x", sessionId: "sess1" };
+    let sent: (() => void) | undefined;
+    (hub.mcp as any).lives.set("sess1:number:1", { afterSent: (fn: () => void) => (sent = fn), onDrop: () => {}, idle: () => {}, signal: new AbortController().signal });
+    const first = await hub.mcp.call(ctx, "jam_inbox", {}, { requestId: 1 });
+    expect(JSON.stringify(first)).toContain("Fix the footer");
+    // The reply never went out: still waiting, offered again.
+    expect(s.hasInbox(a.id)).toBe(true);
+    const again = await hub.mcp.call(ctx, "jam_inbox", {}, { requestId: 1 });
+    expect(JSON.stringify(again)).toContain("Fix the footer");
+    // Sent this time: now it is read.
+    sent?.();
+    expect(s.hasInbox(a.id)).toBe(false);
+  } finally {
+    hub.devproxy.stop();
+    hub.stop();
+  }
+});

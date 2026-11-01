@@ -620,6 +620,8 @@ export class Brain {
    */
   tools(batch: JamEvent[], pass: { effects: number }, from: "person" | "agent" = "person", route: "direct" | "overheard" = "direct", answerOnly = false, claim = this.session.stageClaim()) {
     const s = this.session;
+    // What an agent says never sends work or pairs agents by itself: it waits on the Tasks board for a person, whatever route was passed.
+    if (from === "agent") route = "overheard";
     this.unlockRefused.clear();
     this.replaceOk.clear();
     const sourceIds = batch.map((e) => e.id);

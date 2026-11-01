@@ -494,6 +494,20 @@ export async function hostVerified(): Promise<boolean> {
   }
 }
 
+/** On every connection: if the relay now reaches another host than this page was loaded for, the page reloads (once) so its identity, records and state belong to that host. */
+export async function recheckHost(): Promise<boolean> {
+  if (!currentHostKey()) return true;
+  try {
+    const r = await fetch("/api/pair/info", { signal: AbortSignal.timeout(2500) });
+    const id = String((await r.json()).hostId ?? "");
+    if (id && id !== currentHostKey()) {
+      reloadForNewHost();
+      return false;
+    }
+  } catch {}
+  return true;
+}
+
 function reloadForNewHost() {
   try {
     const key = "jamsesh.hostReload";

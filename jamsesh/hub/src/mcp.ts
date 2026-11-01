@@ -619,8 +619,16 @@ export class McpEndpoint {
         if (conflict) return text(`"${workstream.title}" belongs to ${conflict.name} (${conflict.status}, ${conflict.activity}). Message them with jam_message to split the work, or pass force:true if the room reassigned it.`);
         return text(`You own "${workstream.title}".${workstream.brief ? `\n\nBrief so far:\n${workstream.brief}` : ""}`);
       }
-      case "jam_inbox":
-        return text(this.inboxText(this.requireAgent(ctx), true, ctx.origin));
+      case "jam_inbox": {
+        const agent = this.requireAgent(ctx);
+        const live = this.lives.get(`${ctx.sessionId}:${typeof extra?.requestId}:${extra?.requestId}`);
+        const taken = { directives: [] as Directive[], messages: [] as JamEvent[] };
+        const out = this.inboxText(agent, true, ctx.origin, taken);
+        // Marked read only when the reply carrying it has been fully sent; a dropped connection leaves it for the next call (at least once).
+        if (live) live.afterSent(() => s.markInbox(agent.id, taken));
+        else s.markInbox(agent.id, taken);
+        return text(out);
+      }
       case "jam_wait": {
         // Shutting down: no new wait starts (it would write after the final save), and nothing is touched to say so.
         if (this.hub.closing) return text("");

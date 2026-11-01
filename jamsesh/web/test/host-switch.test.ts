@@ -56,3 +56,10 @@ test("a page whose host id is only remembered sends nothing as that host: the ed
   const last = out.trim().split("\n").at(-1) ?? "";
   expect(JSON.parse(last)).toEqual({ queued: true, sentToHub: [], reloads: 1 });
 });
+
+test("a confirmed page reloads when the relay later reaches another host, and not while it is the same one", async () => {
+  const p = Bun.spawn(["bun", "run", `${import.meta.dir}/fixtures/confirmed-host-moves.ts`], { stdout: "pipe", stderr: "pipe" });
+  const out = await new Response(p.stdout).text();
+  await p.exited;
+  expect(JSON.parse(out.trim().split("\n").at(-1) ?? "")).toEqual({ same: true, moved: false, reloads: 1 });
+});

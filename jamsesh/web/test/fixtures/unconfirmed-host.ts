@@ -20,3 +20,4 @@ const r: any = await api("/annotations", { text: "move the logo" }, "POST");
 outbox.stop();
 console.log(JSON.stringify({ queued: r.queued === true, sentToHub: sent, reloads: (globalThis as any).__reloads ?? 0 }));
 process.exit(0);
+
