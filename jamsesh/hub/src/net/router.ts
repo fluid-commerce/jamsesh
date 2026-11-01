@@ -191,8 +191,18 @@ export const CGNAT_MESSAGE = "Your internet provider shares one public address b
 
 const LEASE = 3600;
 
+/** Renewal tries again this soon after a failed attempt; this many failures in a row are reported as a lost forward. */
+const RETRY_MS = 60_000;
+const MAX_RENEW_FAILS = 3;
+
 export class PortMapper {
-  private timer?: ReturnType<typeof setInterval>;
+  /** Called when a renewal shows the forward is gone or moved, with a sentence for the person. */
+  onLost?: (message: string) => void;
+  /** Overrides the renewal wait (tests only). */
+  renewAfterMs?: number;
+  private timer?: ReturnType<typeof setTimeout>;
+  private fails = 0;
+  private granted = LEASE;
   private igd: Igd | null = null;
   private current?: { gateway?: string; method: RouterStatus["method"]; internalPort: number; externalPort: number; lanIp: string };
   /** A request that may have been applied though its reply never came: kept until a delete is confirmed, and never renewed. */
@@ -269,14 +279,23 @@ export class PortMapper {
       status.cgnat = true;
       status.message = CGNAT_MESSAGE;
     }
-    if (this.current) this.timer = setInterval(() => void this.renew(), (LEASE / 2) * 1000);
-    (this.timer as any)?.unref?.();
+    if (this.current) {
+      this.fails = 0;
+      this.granted = Math.min(LEASE, status.lifetimeSec ?? LEASE); // renewed by the lifetime the router actually granted
+      this.schedule(this.granted * 500);
+    }
     return status;
   }
 
   private unrenew() {
-    if (this.timer) clearInterval(this.timer);
+    if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
+  }
+
+  private schedule(ms: number) {
+    this.unrenew();
+    this.timer = setTimeout(() => void this.renew(), this.renewAfterMs ?? Math.max(1000, ms));
+    (this.timer as any).unref?.();
   }
 
   /** A renewal being sent: stopping waits for it, so it can't land after the final delete. */
@@ -290,11 +309,38 @@ export class PortMapper {
   private async renewOnce() {
     const c = this.current;
     if (!c) return;
+    let problem: string | undefined;
+    let lifetime = LEASE;
     try {
-      if (c.method === "nat-pmp" && c.gateway) await pmpMap(c.gateway, c.internalPort, c.externalPort, LEASE);
-      else if (c.method === "upnp" && this.igd)
-        await soap(this.igd, "AddPortMapping", { NewRemoteHost: "", NewExternalPort: c.externalPort, NewProtocol: "TCP", NewInternalPort: c.internalPort, NewInternalClient: c.lanIp, NewEnabled: 1, NewPortMappingDescription: "JamSesh", NewLeaseDuration: LEASE });
-    } catch {}
+      if (c.method === "nat-pmp" && c.gateway) {
+        const r = await pmpMap(c.gateway, c.internalPort, c.externalPort, LEASE);
+        if (!r.supported || r.result !== 0) problem = "The router didn't confirm renewing the port forward.";
+        else if (r.externalPort !== c.externalPort) {
+          // The router moved it: the public link would point at the wrong port, so that forward is taken back and the loss is reported.
+          this.current = { ...c, externalPort: r.externalPort };
+          await this.unmap();
+          this.onLost?.(`The router moved the port forward to port ${r.externalPort}, so remote access no longer works. Press Retry.`);
+          return;
+        } else lifetime = Math.min(LEASE, r.lifetimeSec || LEASE);
+      } else if (c.method === "upnp" && this.igd) {
+        const r = await soap(this.igd, "AddPortMapping", { NewRemoteHost: "", NewExternalPort: c.externalPort, NewProtocol: "TCP", NewInternalPort: c.internalPort, NewInternalClient: c.lanIp, NewEnabled: 1, NewPortMappingDescription: "JamSesh", NewLeaseDuration: LEASE });
+        if (!r.ok) problem = `The router refused to renew the port forward (UPnP error ${r.errorCode ?? "unknown"}).`;
+      }
+    } catch (e) {
+      problem = `The router didn't answer when renewing the port forward (${(e as Error).message}).`;
+    }
+    if (!this.current) return; // taken down meanwhile
+    if (!problem) {
+      this.fails = 0;
+      this.granted = lifetime;
+      this.schedule(lifetime * 500);
+      return;
+    }
+    if (++this.fails >= MAX_RENEW_FAILS) {
+      this.onLost?.(`${problem} Remote access may stop working soon. Press Retry.`);
+      return; // nothing more is scheduled; the forward is still tracked so turning off tries to remove it
+    }
+    this.schedule(RETRY_MS);
   }
 
   /** Removes the mapping (NAT-PMP: lifetime 0; UPnP: DeletePortMapping). True once the router has said it is gone (or there was none); false when that couldn't be confirmed, and the mapping is kept to try again. */

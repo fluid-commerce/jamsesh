@@ -677,3 +677,86 @@ test("a reconfiguration whose file can't be saved puts the earlier setting's ser
   expect(calls).toContain("map"); // the earlier forward is open again
   (n as any).saveConfig = real;
 });
+
+test("a renewal the router refuses is retried, and after three failures the forward is reported lost instead of silently going stale", async () => {
+  const { PortMapper } = await import("../src/net/router");
+  let ok = false;
+  const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(ok ? "<r/>" : "<errorCode>718</errorCode>", { status: ok ? 200 : 500 }) });
+  try {
+    const m: any = new PortMapper();
+    m.igd = { control: `http://127.0.0.1:${server.port}/ctl`, type: "urn:x:service:WANIPConnection:1", location: "x" };
+    m.current = { method: "upnp", internalPort: 4443, externalPort: 443, lanIp: "10.0.0.2" };
+    const lost: string[] = [];
+    m.onLost = (msg: string) => lost.push(msg);
+    await m.renewOnce();
+    await m.renewOnce();
+    expect(lost.length).toBe(0);
+    expect(m.timer).toBeDefined(); // another try is scheduled
+    await m.renewOnce();
+    expect(lost.length).toBe(1);
+    expect(lost[0]).toContain("718");
+    expect(m.current).toBeDefined(); // still tracked, so turning off tries to remove it
+    // A good renewal resets the count and is scheduled from the lifetime.
+    ok = true;
+    m.fails = 0;
+    await m.renewOnce();
+    expect(m.fails).toBe(0);
+    m.unrenew();
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("room audio goes only to a listener the helper we started owns", async () => {
+  const { ownsPort } = await import("../src/audio/whisper");
+  const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("x") });
+  try {
+    expect(await ownsPort(server.port!, process.pid)).toBe(true); // this process is the listener
+    expect(await ownsPort(server.port!, 99999)).toBe(false); // someone else's process on that port is not ours
+    expect(await ownsPort(1, process.pid)).toBe(false); // nothing listening
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("a turn-off made while a setup waits on the old name's certificate order wins: the setup saves and starts nothing", async () => {
+  const { Network } = await import("../src/net");
+  const n = new Network(join(dir, "net-order"), (async () => new Response("OK\n1.2.3.4\n\nUPDATED")) as any);
+  (n as any).ensureCert = async () => {};
+  (n as any).mapper = { map: async () => ({ method: "upnp" }), unmap: async () => true };
+  (n as any).cfg = { domain: "old.duckdns.org", token: "00000000-0000-0000-0000-000000000000", externalPort: 443, internalPort: 4443, enabled: true, staging: false };
+  let release!: () => void;
+  (n as any).issuing = new Promise<void>((r) => (release = r));
+  const post = (p: string, body: object) => n.routes(new Request(`http://x/api/net/${p}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }), new URL(`http://x/api/net/${p}`));
+  const setup = post("config", { domain: "new", token: "11111111-1111-1111-1111-111111111111" });
+  await Bun.sleep(50);
+  const off = post("disable", {});
+  release();
+  expect((await setup)?.status).toBe(409);
+  await off;
+  expect((n as any).cfg.enabled).toBe(false);
+  expect((n as any).cfg.domain).toBe("old.duckdns.org");
+});
+
+test("a refused screen change doesn't count as the room's latest, so it can't hold back the automatic comparison", async () => {
+  process.env.JAMSESH_SILENT = "1";
+  const { Hub } = await import("../src/hub");
+  const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "brain-stage"), teamDir: join(dir, "team-bs") });
+  try {
+    clearInterval((hub.brain as any).digestTimer);
+    const chey = hub.session.upsertPerson({ name: "Chey" });
+    const ev: any = { id: "e1", type: "utterance", at: Date.now(), authorId: chey.id, authorName: "Chey", text: "show the board" };
+    const tools = (hub.brain as any).tools([ev], { effects: 0 }, "person", "direct");
+    const real = hub.session.setStage.bind(hub.session);
+    (hub.session as any).setStage = () => ({ applied: false, reason: "The screen changed since you looked." });
+    const refused = await tools.show_on_screen.execute({ mode: "board" }, { toolCallId: "1", messages: [] });
+    expect(String(refused)).toContain("didn't land");
+    expect((hub.brain as any).lastRoomStageAt).toBe(0);
+    (hub.session as any).setStage = real;
+    await tools.show_on_screen.execute({ mode: "board" }, { toolCallId: "2", messages: [] });
+    expect((hub.brain as any).lastRoomStageAt).toBeGreaterThan(0);
+  } finally {
+    hub.devproxy.stop();
+    hub.stop();
+  }
+});

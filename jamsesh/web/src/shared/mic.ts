@@ -119,12 +119,17 @@ export class AudioBuffer {
   /** A finished speech segment: straight to the hub when it is reachable, else saved. */
   async submit(seg: AudioSeg) {
     await this.load();
-    if (!this.rows.length && !this.draining && this.canSend()) {
-      const r = await this.post(seg);
-      if (r === "ok") return this.done();
-      if (r === "drop") return void this.dropped++;
-    }
+    const direct = !this.rows.length && !this.draining && this.canSend();
+    // Saved before it is sent: if the window closes while the upload is out, the segment is still here next time.
     seg.seq = await this.table.add(seg);
+    if (direct) {
+      const r = await this.post(seg);
+      if (r === "ok" || r === "drop") {
+        await this.table.delete(seg.seq);
+        if (r === "ok") return this.done();
+        return void this.dropped++;
+      }
+    }
     this.rows.push(seg);
     this.rows.sort((a, b) => a.t0 - b.t0);
     await this.trim();

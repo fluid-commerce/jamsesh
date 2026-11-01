@@ -13,36 +13,13 @@ some Codex, and maybe a phone or two. Paths are under `jamsesh/` unless noted.
 These break the core loop (the room is heard, the brain acts sensibly, nothing is lost) or open
 the host to something nobody intended.
 
-### 1. Nobody is heard until they unmute [A8c]
+### 1. Resolved in the release candidate
 
-- **Spec:** the mic is on whenever a window is open, unless muted; the big screen's room mic starts
-  with the host (SPEC 9.1).
-- **Code:** a mic starts on load only if the saved preference is already `"on"`, and nothing sets
-  it except a manual toggle. A first-time laptop, and the host's room mic, start muted.
-  - `web/src/client/ClientView.tsx:72` (`pref("mic") === "on"`)
-  - `web/src/host/HostView.tsx:63` (`pref("hostMic") === "on"`)
-- **Effect tomorrow:** the multi-device audio, speaker ID, and the room mic all depend on someone
-  remembering to press `M` on every machine, including the big screen.
-- **Close it:** default the preference to on; start the mic on the first user gesture when the
-  browser needs one, with a visible "Listening" state; start the host's room mic when hosting
-  starts (the host window is a secure origin).
+The mic now defaults to on unless the person muted it (`web/src/client/ClientView.tsx`, `web/src/host/HostView.tsx` check `!== "off"`).
 
-### 2. Any mention of the brain's name, anywhere, is a direct address [A8d, A10, B24]
+### 2. Resolved in the release candidate
 
-- **Spec:** a line addresses the brain when it starts with the name (optionally after "hey", "ok",
-  and so on) or names it as the one spoken to; whole words only; prompts typed to agents are
-  context, never direct addresses (SPEC 8.2, 6.4).
-- **Code:** `addressesBrain` flattens text and name and returns true if the name appears anywhere,
-  even inside a word (`hub/src/brain/brain.ts:817-823`). Prompts people type to their own agents
-  go through `brain.hear` (`hub/src/hub.ts:368`), so any prompt containing "jamsesh" (for example
-  "update the jamsesh skill", or a second "connect to jamsesh") triggers a chime, a direct router
-  pass, and possibly a spoken reply. Short custom names match inside other words ("Max" in
-  "maximum").
-- **Effect tomorrow:** the team will say and type "JamSesh" constantly while talking about the
-  tool. Expect stray chimes, stray actions, and the brain talking over people.
-- **Close it:** require a whole-word match at the start (after an optional greeting) or a vocative
-  pattern; never treat `prompt` events as direct addresses; add tests for "the jamsesh skill",
-  "maximum" with the name "Max", and a typed agent prompt.
+`addressesBrain` (`hub/src/brain/brain.ts`) matches the name only as a form of address, whole words, and prompts typed to agents are never direct addresses.
 
 ### 3. A gateway error silently drops what the room said [A16a, B14, B16]
 
@@ -102,17 +79,9 @@ the host to something nobody intended.
   with the token check, as the HTTPS path already does; add `jam_devserver` removal and expiry with
   the agent.
 
-### 7. "Connected devices" and **Disconnect** don't work [security]
+### 7. Resolved in the release candidate
 
-- **Spec:** the host disconnects any device; its token stops at once and its connections close
-  (SPEC 14).
-- **Code:** Settings calls `GET /api/paired` and `DELETE /api/paired/:id`
-  (`web/src/shared/Settings.tsx:252`, `:265`); no such routes exist in `hub/src/http.ts`, so the
-  list is always "Nothing paired yet" and Disconnect 404s. `Auth.revoke()` and `Auth.list()`
-  (`hub/src/auth.ts:142-153`) are called only by tests. The client has no handler for the `revoked`
-  bus message, and open sockets aren't closed. STATUS.md says revocation is "Tested live".
-- **Close it:** add the two host-only routes, close the device's WebSocket and MCP sessions on
-  revoke, handle `revoked` in `web/src/shared/hub.ts`, and test the UI path.
+`GET /api/paired`, `DELETE /api/paired/:id` and the allow route exist in `hub/src/http.ts`; Disconnect revokes the device's token. Closing that device's open sockets at once is not checked here.
 
 ### 8. Titles set after joining don't change whose call wins [B37, A15]
 
@@ -442,7 +411,6 @@ These aren't requirement gaps but will mislead someone tomorrow.
 | Doc | Says | Code | Fix |
 |---|---|---|---|
 | `STATUS.md:32` | "Agents asking the host to build their branch: Not built" | Built in commit 219f0745: `jam_host_preview`, `HostControl.request/decide`, `BuildRequests.tsx`, voice approval | Update STATUS |
-| `STATUS.md` | "Pairing, rotating code, lockout, revocation: Tested live" | Revocation has no route (gap 7) | Correct the row |
 | `README.md:185` | "Send to JamSesh" | Button reads "Send N to <brain name>" (`web/src/shared/annotate.tsx:703`) | Match the label |
 | `README.md:178` | Feedback notes last "for the session" | Notes are team-level and persist across sessions (`hub/src/store.ts:42-55`); the tool text also says "rest of the session" (`hub/src/brain/brain.ts:530`) | README and tool text now match the spec: team-level |
 | `README.md` key table | Omits `M` and `A` | Both work on the big screen | Add them |

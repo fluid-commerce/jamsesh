@@ -444,11 +444,24 @@ export interface QueuedResult {
  * saved on this laptop and sent later in order, each with an `x-jam-idem` key so the hub
  * applies it once; the caller gets `{ ok: true, queued: true, idem }` back. GETs fail fast.
  */
-export async function api<T = any>(path: string, body?: unknown, method?: string, opts: ApiOptions = {}): Promise<T> {
+export function api<T = any>(path: string, body?: unknown, method?: string, opts: ApiOptions = {}): Promise<T> {
   const m = (method ?? (body === undefined ? "GET" : "POST")).toUpperCase();
   const mutating = m !== "GET" && m !== "HEAD";
   const queueable = mutating && opts.queue !== false && !NEVER_QUEUE.test(path);
   const idem = mutating ? uuid() : undefined;
+  if (!queueable) return send<T>(path, body, m, opts, mutating, false, idem);
+  // Queueable edits go one at a time, in the order they were made: an older one that arrives late can't overwrite a newer one.
+  const run = apiChain.then(() => send<T>(path, body, m, opts, mutating, true, idem));
+  apiChain = run.then(
+    () => {},
+    () => {},
+  );
+  return run;
+}
+
+let apiChain: Promise<unknown> = Promise.resolve();
+
+async function send<T>(path: string, body: unknown, m: string, opts: ApiOptions, mutating: boolean, queueable: boolean, idem: string | undefined): Promise<T> {
   const save = async () => {
     await outbox.enqueue(m, path, body, idem);
     return { ok: true, queued: true, idem } as unknown as T;
@@ -460,6 +473,16 @@ export async function api<T = any>(path: string, body?: unknown, method?: string
   if (queueable && (outbox.get().pending > 0 || navigator.onLine === false)) return save();
   if (navigator.onLine === false) throw new OfflineError();
 
+  // A direct send is saved first and removed once the hub has answered, so a window closed mid-request loses nothing.
+  const held = queueable ? await outbox.hold(m, path, body, idem as string).catch(() => undefined) : undefined;
+  try {
+    return await sendNow<T>(path, body, m, opts, mutating, queueable, idem, save);
+  } finally {
+    if (held != null) await outbox.release(held).catch(() => {});
+  }
+}
+
+async function sendNow<T>(path: string, body: unknown, m: string, opts: ApiOptions, mutating: boolean, queueable: boolean, idem: string | undefined, save: () => Promise<T>): Promise<T> {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), opts.timeoutMs ?? (mutating ? 10_000 : 8_000));
   let res: Response;

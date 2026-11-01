@@ -10,6 +10,7 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { type HelperRegistry, stopHelper, withStdinWatch } from "../children";
 import { config } from "../config";
+import { runShort } from "../hostctl";
 import { downloadVerified, fileMatches, type ModelState, type ModelStatus } from "./models";
 import { encodeWav } from "./wav";
 
@@ -188,7 +189,7 @@ export class LocalWhisper {
     });
     const until = Date.now() + this.startupMs;
     while (died === null && !this.stopped && Date.now() < until && !(await ping(url))) await Bun.sleep(250);
-    if (died === null && !this.stopped && (await isWhisperServer(url))) {
+    if (died === null && !this.stopped && (await ownsPort(port, proc.pid)) && (await isWhisperServer(url))) {
       this.set("ready", "Running on this host.");
       return url;
     }
@@ -302,4 +303,30 @@ export function mayReplace(path: string) {
     return (e as NodeJS.ErrnoException)?.code === "ENOENT";
   }
   return ownDownload(path);
+}
+
+/**
+ * True when what listens on `port` is `root` (the helper we started) or one of its descendants. Room audio is only sent
+ * to a listener we can show is ours: another process that took the port in the moment before the helper did is not it.
+ */
+export async function ownsPort(port: number, root: number): Promise<boolean> {
+  const listing = await runShort(["/usr/sbin/lsof", "-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"], 5000);
+  if (listing.code !== 0) return false;
+  const pids = listing.out.split(/\s+/).filter(Boolean).map(Number).filter(Number.isInteger);
+  if (!pids.length) return false;
+  for (const pid of pids) {
+    let at = pid;
+    let owned = false;
+    for (let hop = 0; hop < 8 && at > 1; hop++) {
+      if (at === root) {
+        owned = true;
+        break;
+      }
+      const r = await runShort(["/bin/ps", "-o", "ppid=", "-p", String(at)], 3000);
+      at = Number(r.out.trim());
+      if (!Number.isInteger(at)) break;
+    }
+    if (!owned) return false;
+  }
+  return true;
 }

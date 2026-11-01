@@ -790,7 +790,6 @@ export class Brain {
           if (!screen) return noScreen();
           const held = this.lockBlock(screen, batch, claim);
           if (held) return refuse(held);
-          this.lastRoomStageAt = Date.now();
           const up = put(
             {
               mode: i.mode,
@@ -805,6 +804,7 @@ export class Brain {
             screen,
           );
           if (!up.applied) return refuse(didntLand(up));
+          this.lastRoomStageAt = Date.now(); // only a change that landed counts
           return "On screen.";
         },
       }),
@@ -978,9 +978,9 @@ export class Brain {
           if (!screen) return noScreen();
           const held = this.lockBlock(screen, batch, claim);
           if (held) return refuse(held);
-          this.lastRoomStageAt = Date.now();
           const laid = put({ mode: "layout", title: i.title ?? "", caption: i.caption ?? "", layout: { tiles, grid }, pinned: i.pin ?? false }, screen);
           if (!laid.applied) return refuse(didntLand(laid));
+          this.lastRoomStageAt = Date.now(); // only a change that landed counts
           return `On screen: ${tiles.length} tile(s).${i.tiles.length !== tiles.length ? ` ${i.tiles.length - tiles.length} didn't resolve and were left out (local URLs must be registered dev servers). If the room asked for something that isn't available, tell them briefly.` : ""}`;
         },
       }),
@@ -1122,9 +1122,9 @@ export class Brain {
           if (!item) return refuse("That item isn't waiting any more.");
           const held = this.lockBlock(item.screen, batch, claim);
           if (held) return refuse(held);
-          this.lastRoomStageAt = Date.now();
           const shown = s.showReady(id, castBy(item.screen));
           if (!shown.applied) return refuse(didntLand(shown));
+          this.lastRoomStageAt = Date.now(); // only a change that landed counts
           return `On screen: ${item.label}.`;
         },
       }),
@@ -1139,9 +1139,9 @@ export class Brain {
           if (!entry) return refuse(by ? `Nothing ${by} had up is in the history.` : "There's no earlier screen in the history.");
           const held = this.lockBlock(id, batch, claim);
           if (held) return refuse(held);
-          this.lastRoomStageAt = Date.now();
           const back = s.restoreHistory(entry.id, id, castBy(id), "Room brain");
           if (!back.applied) return refuse(didntLand(back));
+          this.lastRoomStageAt = Date.now(); // only a change that landed counts
           return `Brought back ${entry.label}, which ${entry.by} had up.`;
         },
       }),
@@ -1162,9 +1162,9 @@ export class Brain {
           if (!key) return refuse(`No saved layout called ${name}. Saved: ${Object.keys(all).join(", ") || "none"}.`);
           const held = this.lockBlock("main", batch, claim);
           if (held) return refuse(held);
-          this.lastRoomStageAt = Date.now();
           const saved = put({ ...all[key] }, "main");
           if (!saved.applied) return refuse(didntLand(saved));
+          this.lastRoomStageAt = Date.now(); // only a change that landed counts
           return `On screen: ${key}.`;
         },
       }),

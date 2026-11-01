@@ -39,7 +39,14 @@ export class Network {
   private cfgPath: string;
   private cfg: NetConfig | null = null;
   private store: CertStore;
-  private mapper = new PortMapper();
+  private mapper = (() => {
+    const m = new PortMapper();
+    m.onLost = (message) => {
+      this.st.router = { state: "error", method: "none", message } as any;
+      this.st.reachable = "unknown";
+    };
+    return m;
+  })();
   private stopUpdater?: () => Promise<void>;
   private renewTimer?: ReturnType<typeof setInterval>;
   private certRetry?: ReturnType<typeof setTimeout>;
@@ -328,6 +335,11 @@ export class Network {
         this.st.dns = "ok";
         await this.issuing?.catch(() => {}); // an order for the old name finishes first; its certificate is replaced by the check on names
         if (this.shut) return json({ error: "The host is closing." }, 503);
+        if (gen !== this.cfgGen) {
+          // A turn-off (or newer setup) arrived while the order for the old name finished: the queued request decides, this one saves and starts nothing.
+          await this.start().catch(() => {});
+          return json({ error: "Another change was made while this one was being checked. Try again." }, 409);
+        }
         try {
           this.saveConfig({ domain: d.fqdn, token, externalPort, internalPort, enabled: true, staging: body.staging ?? this.cfg?.staging ?? false });
         } catch {

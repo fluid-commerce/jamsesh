@@ -255,6 +255,20 @@ export class Outbox {
     return e;
   }
 
+  /**
+   * Saves a call that is about to be sent directly, without queueing it: if the window closes while it is out, the
+   * next load finds it and sends it again with the same key. `release` removes it once the hub's answer is known.
+   */
+  async hold(method: string, path: string, body: unknown, idem: string): Promise<number | undefined> {
+    await this.load();
+    const e: OutboxEntry = { idem, method, path, body, createdAt: this.now(), serverFails: 0, hostId: this.d.hostId?.() ?? "" };
+    return this.d.table.add(e);
+  }
+
+  async release(seq: number | undefined) {
+    if (seq != null) await this.d.table.delete(seq);
+  }
+
   private schedule() {
     if (this.timer != null) return;
     const ms = backoffMs(this.attempt++, this.d.random);
