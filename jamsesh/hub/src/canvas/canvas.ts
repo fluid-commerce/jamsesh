@@ -117,8 +117,9 @@ export class Canvas {
       await this.startHost();
       this.checkRunning();
       this.startFailures = 0;
-      this.poller = setInterval(() => this.poll(), POLL_MS);
-      this.timers = [setInterval(() => this.reapIdleAgents(), 60_000), setInterval(() => this.watchdog().catch(() => {}), 30_000)];
+      // The room's timer registry: closing the room ends them all in one call.
+      this.poller = this.session.timers.every(() => this.poll(), POLL_MS);
+      this.timers = [this.session.timers.every(() => this.reapIdleAgents(), 60_000), this.session.timers.every(() => this.watchdog().catch(() => {}), 30_000)].filter((x): x is NonNullable<typeof x> => x !== null);
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
       if (!this.stopped) console.error("canvas:", reason);
@@ -163,8 +164,8 @@ export class Canvas {
   halt() {
     this.stopped = true;
     if (this.startRetry) clearTimeout(this.startRetry);
-    if (this.poller) clearInterval(this.poller);
-    for (const t of this.timers.splice(0)) clearInterval(t);
+    this.session.timers.clear(this.poller);
+    for (const t of this.timers.splice(0)) this.session.timers.clear(t);
   }
 
   /** Halts, then stops every helper in the registry. True when each one's exit was seen (a TERM-resistant one gets KILL). */
@@ -560,15 +561,24 @@ export class Canvas {
     } else if (tool === "run_command" && /^(node|frame|component)\.create/.test(String(args?.command ?? ""))) a.created++;
     else a[k]++;
     this.session.touchAgent(agent.id, { status: "working", activity: "Designing on the canvas" });
-    if (!a.timer) {
-      a.timer = setTimeout(() => {
-        const cur = this.activity.get(agent.id)!;
-        this.activity.delete(agent.id);
-        const parts = [cur.created && `${cur.created} new layer${cur.created > 1 ? "s" : ""}`, cur.edited && `${cur.edited} edit${cur.edited > 1 ? "s" : ""}`].filter(Boolean);
-        if (parts.length) {
-          this.session.store.addEvent({ kind: "canvas", authorType: "agent", authorId: agent.id, authorName: agent.name, text: `Canvas: ${parts.join(", ")}.`, relevance: "work" });
-        }
-      }, 12_000);
+    if (!a.timer) a.timer = this.session.timers.after(() => this.reportActivity(agent), 12_000);
+  }
+
+  /** Writes one agent's batched canvas work into the feed (when its timer fires, and for every agent at shutdown). */
+  private reportActivity(agent: { id: string; name: string }) {
+    const cur = this.activity.get(agent.id);
+    if (!cur) return;
+    this.session.timers.clear(cur.timer);
+    this.activity.delete(agent.id);
+    const parts = [cur.created && `${cur.created} new layer${cur.created > 1 ? "s" : ""}`, cur.edited && `${cur.edited} edit${cur.edited > 1 ? "s" : ""}`].filter(Boolean);
+    if (parts.length) this.session.store.addEvent({ kind: "canvas", authorType: "agent", authorId: agent.id, authorName: agent.name, text: `Canvas: ${parts.join(", ")}.`, relevance: "work" });
+  }
+
+  /** Closing the room: batches still waiting for their timer are recorded now. */
+  flushActivity() {
+    for (const id of [...this.activity.keys()]) {
+      const agent = this.session.agent(id);
+      this.reportActivity({ id, name: agent?.name ?? "An agent" });
     }
   }
 

@@ -1,5 +1,6 @@
 // Session storage: SQLite on disk, with small collections cached in memory.
 // Events (the context log) get full-text search through FTS5.
+import { pastDeadline } from "./room-context";
 import { Database } from "bun:sqlite";
 import { join } from "node:path";
 import { bus } from "./bus";
@@ -84,6 +85,37 @@ export class Store {
 
   /** The team store (people, devices, voiceprints, team settings); null when this is the team store. */
   team: Store | null = null;
+
+  /**
+   * Set by Hub.shutdown. "events" (the conversation is sealed, the wiki's last capture is about to read it): an event write
+   * throws (code ESEALED), which a request answers with 503, so nothing lands that the capture would miss. "all" (the final
+   * capture is done and the hub has stopped): every write path comes through writable(), which drops the write with a logged
+   * warning and returns false. A late timer, refresh or job can then neither corrupt anything nor fail unhandled; whatever it
+   * would have written is by definition not part of the session record, which was taken at the capture.
+   */
+  private sealed: "events" | "all" | null = null;
+
+  seal(what: "events" | "all") {
+    if (this.sealed !== "all") this.sealed = what;
+    if (what === "all") this.team?.seal("all");
+  }
+
+  private dropped = 0;
+
+  /** The room has stopped: writes are dropped. */
+  get closed() {
+    return this.sealed === "all";
+  }
+
+  /** True when a write may go ahead. A write by work that began in a request and outlived the shutdown deadline (room-context.ts): false, like sealed "all". Sealed "all": false (the write is dropped, logged). Sealed "events" and an event write: throws. */
+  private writable(event = false): boolean {
+    if (this.sealed === "all" || pastDeadline()) {
+      if (this.dropped++ % 50 === 0) console.warn(`store: the room is closed; a write was dropped (${this.dropped} so far)`);
+      return false;
+    }
+    if (event && this.sealed === "events") throw Object.assign(new Error("The room is closed."), { code: "ESEALED" });
+    return true;
+  }
 
   constructor(dir: string, file = "jamsesh.db") {
     this.db = new Database(join(dir, file), { create: true });
@@ -186,6 +218,7 @@ export class Store {
   put<K extends CollectionName>(c: K, doc: Collections[K] & { id: string }, broadcast = true): Collections[K] {
     this.rev++;
     if (this.team && TEAM_COLLECTIONS.has(c)) return this.team.put(c, doc, broadcast);
+    if (!this.writable()) return doc;
     this.remember(c, doc.id);
     this.map(c).set(doc.id, doc);
     this.db
@@ -204,6 +237,7 @@ export class Store {
   remove(c: CollectionName, id: string): void {
     this.rev++;
     if (this.team && TEAM_COLLECTIONS.has(c)) return this.team.remove(c, id);
+    if (!this.writable()) return;
     this.remember(c, id);
     this.map(c).delete(id);
     this.db.query("DELETE FROM docs WHERE collection = ? AND id = ?").run(c, id);
@@ -221,6 +255,7 @@ export class Store {
 
   /** True when the reply was kept. Whole or not at all: a cut-off body would be replayed as a successful answer that isn't valid, so one too big to keep is not kept (false), and the caller holds it in memory instead. */
   saveReply(key: string, r: { status: number; type: string; body: string }): boolean {
+    if (!this.writable()) return true; // dropped: the room is closed
     if (r.body.length > 2_000_000) return false;
     this.db.query("INSERT OR REPLACE INTO replies (key, status, type, body, at) VALUES (?, ?, ?, ?, ?)").run(key, r.status, r.type, r.body, Date.now());
     if (Math.random() < 0.02) this.db.query("DELETE FROM replies WHERE at < ?").run(Date.now() - REPLAY_MS);
@@ -236,6 +271,7 @@ export class Store {
   setSetting(key: string, value: unknown): void {
     this.rev++;
     if (this.team && TEAM_SETTINGS.has(key)) return this.team.setSetting(key, value);
+    if (!this.writable()) return;
     this.db.query("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(key, JSON.stringify(value));
   }
 
@@ -243,6 +279,7 @@ export class Store {
 
   /** A recording token a window cancelled (kept an hour, longer than any Start can be in flight). Only that window's own cancels push out its oldest. */
   cancelToken(device: string, token: string, now = Date.now()) {
+    if (!this.writable()) return;
     this.db.query("DELETE FROM cancels WHERE at < ?").run(now - CANCEL_KEEP_MS);
     this.db.query("INSERT OR REPLACE INTO cancels (device, token, at) VALUES (?, ?, ?)").run(device, token, now);
     this.db.query("DELETE FROM cancels WHERE device = ? AND token NOT IN (SELECT token FROM cancels WHERE device = ? ORDER BY at DESC LIMIT 200)").run(device, device);
@@ -262,6 +299,7 @@ export class Store {
     data?: Record<string, any>;
     ts?: number;
   }): JamEvent {
+    if (!this.writable(true)) return { id: 0, ts: e.ts ?? Date.now(), kind: e.kind, authorType: e.authorType, authorId: e.authorId ?? null, authorName: e.authorName, text: e.text, relevance: e.relevance ?? null, workstreamId: e.workstreamId ?? null, data: e.data ?? {} };
     this.rev++;
     const ts = e.ts ?? Date.now();
     const row = this.db
@@ -297,6 +335,7 @@ export class Store {
   }
 
   updateEvent(id: number, fields: Partial<Pick<JamEvent, "text" | "relevance" | "workstreamId" | "authorId" | "authorName" | "data">>) {
+    if (!this.writable(true)) return;
     this.rev++;
     const cur = this.event(id);
     if (!cur) return;
@@ -310,6 +349,7 @@ export class Store {
 
   /** Drops the voice embedding kept with a person's speech lines (their voice was reset). Returns how many. */
   scrubEmbeddings(personId: string): number {
+    if (!this.writable()) return 0;
     const where = "author_id = ? AND json_extract(data, '$.embedding') IS NOT NULL";
     // Counted first: the search index's triggers count toward the update's changes.
     const n = (this.db.query(`SELECT COUNT(*) AS n FROM events WHERE ${where}`).get(personId) as { n: number }).n;
@@ -319,6 +359,7 @@ export class Store {
 
   /** Deletes everything one agent put in the room, or that was addressed to it. Returns the ids. */
   deleteAgentEvents(agentId: string): number[] {
+    if (!this.writable(true)) return [];
     // Only what the agent itself authored: messages others sent it and prompts its person wrote stay.
     const where = "author_id = ?1";
     const rows = this.db.query(`SELECT id, text, author_name FROM events WHERE ${where}`).all(agentId) as { id: number; text: string; author_name: string }[];
@@ -434,6 +475,7 @@ export class Store {
   }
 
   setDigest(scope: string, text: string, throughEvent: number) {
+    if (!this.writable()) return;
     this.rev++;
     this.db
       .query("INSERT OR REPLACE INTO digests (scope, text, updated, through_event) VALUES (?, ?, ?, ?)")
@@ -486,6 +528,7 @@ export class Store {
   addVoiceSample(personId: string, embedding: Float32Array, kind: VoiceKind, heardAt: number): boolean {
     if (!(Number.isFinite(heardAt) && heardAt > this.voiceResetAt(personId))) return false;
     if (this.team) return this.team.addVoiceSample(personId, embedding, kind, heardAt);
+    if (!this.writable()) return false;
     this.db.query("INSERT INTO voiceprints (person_id, ts, embedding, kind) VALUES (?, ?, ?, ?)").run(personId, Date.now(), new Uint8Array(embedding.buffer.slice(0)), kind);
     // Automatic samples are the only ones that age out: the 40 most recent. What a person read or corrected stays (up to 24 each).
     for (const [k, keep] of [["auto", 40], ["enrol", 24], ["correction", 24]] as const)
@@ -511,17 +554,20 @@ export class Store {
 
   deleteVoiceSamples(ids: number[]): void {
     if (this.team) return this.team.deleteVoiceSamples(ids);
+    if (!this.writable()) return;
     for (const id of ids) this.db.query("DELETE FROM voiceprints WHERE rowid = ?").run(id);
   }
 
   /** Drops one kind of a person's samples (a new join read replaces the old one). */
   clearVoiceKind(personId: string, kind: VoiceKind): void {
     if (this.team) return this.team.clearVoiceKind(personId, kind);
+    if (!this.writable()) return;
     this.db.query("DELETE FROM voiceprints WHERE person_id = ? AND kind = ?").run(personId, kind);
   }
 
   clearVoiceprint(personId: string): void {
     if (this.team) return this.team.clearVoiceprint(personId);
+    if (!this.writable()) return;
     this.db.query("DELETE FROM voiceprints WHERE person_id = ?").run(personId);
   }
 }

@@ -112,7 +112,7 @@ test("shutdown says whether the final save finished: a save that hangs or fails 
   const dir = mkdtempSync(join(tmpdir(), "jam-shutdown-"));
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
   const budget = Hub.SHUTDOWN_MS;
-  Hub.SHUTDOWN_MS = { snapshot: 200, thumbnail: 200, network: 200, work: 200 };
+  Hub.SHUTDOWN_MS = { snapshot: 200, thumbnail: 200, wiki: 200, network: 200, work: 200 };
   cleanup.push(() => void (Hub.SHUTDOWN_MS = budget));
   const make = () => new Hub({ canvas: false, whisper: false, dataDir: join(dir, String(Math.random())) });
   expect(await make().shutdown()).toBe(true);
@@ -136,8 +136,8 @@ test("shutdown says whether the final save finished: a save that hangs or fails 
   expect(secondDone).toBe(false);
   finish(false);
   expect([await first, await second, runs]).toEqual([false, false, 1]);
-  // The budget the app's wait is built on: its steps add up to 34 seconds (the app waits 45).
-  expect(budget.snapshot + budget.thumbnail + budget.network + budget.work).toBe(34_000);
+  // The budget the app's wait is built on: its steps add up to 54 seconds (the app waits 65).
+  expect(budget.snapshot + budget.thumbnail + budget.wiki + budget.network + budget.work).toBe(54_000);
 });
 
 function readdirOnly(dir: string) {

@@ -13,6 +13,8 @@ export async function methodAllowed(req: Request): Promise<Response | null> {
     case "PATCH":
     case "DELETE":
       return null;
+    case "PUT":
+      return /^\/api\/wiki\//.test(path) ? null : new Response(JSON.stringify({ error: "That method isn't used here." }), { status: 405, headers: { "content-type": "application/json", allow: "GET, POST, PATCH, DELETE" } });
     case "HEAD":
       return FILE_READ.test(path) ? null : new Response(null, { status: 405, headers: { allow: "GET" } });
     case "OPTIONS":

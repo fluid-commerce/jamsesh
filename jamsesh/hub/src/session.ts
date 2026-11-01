@@ -13,6 +13,7 @@ import { canonicalCwd, chatKey, isChatKey } from "./chatkey";
 import { Board, type ContextProposal, type TaskProposal } from "./board";
 import { buildBrief, hasBrief } from "./brief";
 import { newId, PALETTE, Store } from "./store";
+import { Timers } from "./timers";
 import type {
   EventKind,
   Agent,
@@ -89,11 +90,21 @@ export class Session {
   canvas: CanvasInfo = { status: "off", editLink: null, viewLink: null, wsEdit: null, wsView: null, reason: null, generation: 0 };
   brainStatus: HubState["brain"] = { status: "ready", lastError: null };
   private waiters = new Map<string, Set<Waiter>>();
+  /** Every timer of the room that can write (see timers.ts); closing the room ends them all. */
+  readonly timers = new Timers();
   private stageRevert: ReturnType<typeof setTimeout> | null = null;
   private lockSweep: ReturnType<typeof setInterval> | null = null;
   /** Hooks for other modules (set by index.ts) so the session stays dependency-free. */
   /** A card landed on the Tasks board (4.1). */
   onTriage: ((c: TriageCard) => void) | null = null;
+  /** Set by the hub: writes a wiki card's checked pages when a person accepts it (12.8). */
+  wikiAccept: ((c: TriageCard, pages: string[] | undefined, by: string) => { applied: string[]; skipped: string[] } | { error: string; status: number }) | null = null;
+  /** Set by the hub: a wiki card was closed (added or dismissed), for the wiki to finish with its proposal. */
+  wikiClosed: ((c: TriageCard) => void) | null = null;
+  /** Set by the hub: a wiki card is about to be dismissed. An error string keeps it open (pages an earlier accept wrote couldn't be recorded). */
+  wikiDismiss: ((c: TriageCard, by: string) => string | null) | null = null;
+  /** Set by the hub: a fact was saved in the session, for the wiki to file as a source. */
+  onFactSaved: ((f: Fact) => void) | null = null;
   /** The Tasks board's triage: proposals wait here until a person acts. */
   readonly board = new Board(this);
   onUpdate: ((agent: Agent, kind: UpdateKind, text: string, ev: JamEvent) => void) | null = null;
@@ -125,8 +136,7 @@ export class Session {
     this.armRevert("main", this.stage(), 1000);
     for (const id of Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {}))) this.armRevert(id, this.stage(id), 1000);
     // A lock whose owner left lets go without anyone asking.
-    this.lockSweep = setInterval(() => this.sweepLocks(), 30_000);
-    this.lockSweep.unref?.();
+    this.lockSweep = this.timers.every(() => this.sweepLocks(), 30_000);
     bus.resolver = (key) => this.resolve(key);
     // A stage saved before the last stop may point at a tile whose artifact is gone; and when artifacts change later, the same check.
     this.dropDeadExpanded();
@@ -1122,12 +1132,12 @@ export class Session {
       const gone = d.targets.filter(asleep).map((t) => this.agent(t)?.name ?? "That agent");
       if (gone.length) bus.send({ type: "toast", tone: "warn", text: `${gone.join(", ")} isn't connected right now`, detail: "It gets this as soon as it's back." });
       if (d.mode === "explore" || d.mode === "implement")
-        setTimeout(() => {
+        this.timers.after(() => {
           const now = this.store.get("directives", directive.id);
           if (!now || now.status === "done" || now.status === "cancelled") return;
           const idle = d.targets.filter((t) => now.progress[t] === "pending" && !asleep(t) && this.agent(t)?.status !== "waiting").map((t) => this.agent(t)!);
           for (const a of idle) bus.send({ type: "toast", tone: "warn", text: `${a.name} hasn't picked this up yet`, detail: `${a.ownerName}: type anything to it, or tell it to wait for the room (jam_wait).` });
-        }, 45_000).unref?.();
+        }, 45_000);
     });
     return directive;
   }
@@ -1811,9 +1821,9 @@ export class Session {
   private wakeSweep(at: number) {
     if (!Number.isFinite(at)) return;
     if (this.shareSweep && this.shareSweepAt <= at) return;
-    if (this.shareSweep) clearTimeout(this.shareSweep);
+    this.timers.clear(this.shareSweep);
     this.shareSweepAt = at;
-    this.shareSweep = setTimeout(() => {
+    this.shareSweep = this.timers.after(() => {
       this.shareSweep = null;
       this.shareSweepAt = 0;
       try {
@@ -1822,7 +1832,6 @@ export class Session {
         console.error("shares: sweep failed:", e instanceof Error ? e.message : e); // a timer must never take the hub down
       }
     }, Math.max(0, at - Date.now()));
-    this.shareSweep.unref?.();
   }
 
   /**
@@ -2010,6 +2019,7 @@ export class Session {
   /** The hub is stopping: no timer of this session touches its store again (it may be closed or deleted next). */
   private offArtifacts: (() => void) | null = null;
   stop() {
+    this.timers.stop();
     this.offArtifacts?.();
     this.offArtifacts = null;
     for (const t of [this.lockSweep, this.stageRevert, this.shareSweep, ...this.screenReverts.values(), ...this.screenExpiry.values()]) if (t) clearTimeout(t);
@@ -2029,10 +2039,9 @@ export class Session {
     this.bigScreens.set(id, { id, ...info });
     this.sweepScreens();
     // A screen not heard from for 3 minutes stops being listed: say so then (its stored stage stays for when it returns).
-    clearTimeout(this.screenExpiry.get(id));
-    const t = setTimeout(() => this.sweepScreens(), Session.SCREEN_LIVE_MS + 100);
-    t.unref?.();
-    this.screenExpiry.set(id, t);
+    this.timers.clear(this.screenExpiry.get(id));
+    const t = this.timers.after(() => this.sweepScreens(), Session.SCREEN_LIVE_MS + 100);
+    if (t) this.screenExpiry.set(id, t);
   }
 
   static SCREEN_LIVE_MS = 3 * 60_000;
@@ -2064,10 +2073,10 @@ export class Session {
   removeScreen(id: string) {
     if (!this.bigScreens.delete(id)) return;
     this.stageRevs.set(id, this.stageRev(id) + 1); // what was decided for it before it went is stale
-    clearTimeout(this.screenReverts.get(id));
+    this.timers.clear(this.screenReverts.get(id));
     this.screenReverts.delete(id);
     this.defaultStages.delete(id);
-    clearTimeout(this.screenExpiry.get(id));
+    this.timers.clear(this.screenExpiry.get(id));
     this.screenExpiry.delete(id);
     this.sweepScreens();
     // A share only that display showed is off screen from now; a live app on it no longer has drivers (held input is let go).
@@ -2371,17 +2380,17 @@ export class Session {
   /** Sets the screen's return-to-board timer from the stage's saved deadline (none when it stays up). */
   private armRevert(screen: string, st: Stage, minDelay = 0) {
     if (screen === "main") {
-      if (this.stageRevert) clearTimeout(this.stageRevert);
+      this.timers.clear(this.stageRevert);
       this.stageRevert = null;
     } else {
-      clearTimeout(this.screenReverts.get(screen));
+      this.timers.clear(this.screenReverts.get(screen));
       this.screenReverts.delete(screen);
     }
     if (!this.revertsToBoard(st)) return;
     // A stage saved before deadlines were kept falls back to its age.
     const delay = Math.max(minDelay, (st.revertAt ?? st.since + Session.STAGE_REVERT_MS) - Date.now());
-    const t = setTimeout(() => this.revertToBoard(screen, st.since), delay);
-    t.unref?.();
+    const t = this.timers.after(() => this.revertToBoard(screen, st.since), delay);
+    if (!t) return;
     if (screen === "main") this.stageRevert = t;
     else this.screenReverts.set(screen, t);
   }
@@ -2395,8 +2404,8 @@ export class Session {
       void this.setStage({ mode: "board" }, "JamSesh", screen, { override: true });
     } catch (e) {
       console.error(`putting the board back on ${screen} failed; trying again:`, e);
-      const t = setTimeout(() => this.revertToBoard(screen, since), Session.REVERT_RETRY_MS);
-      t.unref?.();
+      const t = this.timers.after(() => this.revertToBoard(screen, since), Session.REVERT_RETRY_MS);
+      if (!t) return;
       if (screen === "main") this.stageRevert = t;
       else this.screenReverts.set(screen, t);
     }
@@ -2887,7 +2896,7 @@ export function stageLabel(stage: Partial<Stage> & { mode: string }, titleOf: (i
   const first = stage.items?.map(titleOf).find(Boolean);
   if (first) return stage.items!.length > 1 ? `${first} and ${stage.items!.length - 1} more` : first;
   if (stage.mode === "layout") return `${stage.layout?.tiles.length ?? 0} tiles`;
-  return ({ spotlight: "Spotlight", compare: "Compare", parity: "Side by side", agents: "What everyone is doing", canvas: "The canvas", custom: "Custom view" } as Record<string, string>)[stage.mode] ?? stage.mode;
+  return ({ spotlight: "Spotlight", compare: "Compare", parity: "Side by side", agents: "What everyone is doing", wiki: "The wiki", canvas: "The canvas", custom: "Custom view" } as Record<string, string>)[stage.mode] ?? stage.mode;
 }
 
 export function publicEvent(e: JamEvent): JamEvent {

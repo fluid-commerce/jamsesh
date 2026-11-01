@@ -1,5 +1,7 @@
 // HTTP, WebSocket and MCP on one port.
 import { parseStage } from "./stageSchema";
+import { inRequest } from "./room-context";
+import { wikiRoute } from "./wiki/routes";
 import type { Server, ServerWebSocket } from "bun";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
@@ -107,7 +109,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|triage\/[\w-]+(\/(send|add|merge|replace|dismiss))?|attachments|record\/(start|stop|send|cancel)|fonts\/(want|lend-ticket|lend|decline|withdraw)|apps(\/[\w-]+(\/(control|input))?)?|drive\/(start|stop|pass|together)|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice(\/start|\/end)?|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots|devserver\/link)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|triage\/[\w-]+(\/(send|add|merge|replace|dismiss))?|attachments|record\/(start|stop|send|cancel)|fonts\/(want|lend-ticket|lend|decline|withdraw)|apps(\/[\w-]+(\/(control|input))?)?|drive\/(start|stop|pass|together)|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice(\/start|\/end)?|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots|devserver\/link|wiki(\/.*)?)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -189,6 +191,7 @@ export function sameOrigin(req: Request) {
   }
 }
 const bad = (msg: string, status = 400) => json({ error: msg }, status);
+const CLOSING = "The room is closing. Try again once it is open.";
 
 /** The live state for whoever asked: an agent's copy leaves out the Tasks board's proposals. */
 function forCaller<T extends { triage: unknown }>(state: T, agent: boolean): T {
@@ -467,10 +470,17 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       const release = () => waiting.get(incoming)?.();
       let res: Response | undefined;
       try {
-        res = await route(incoming, srv);
+        // Everything this request starts carries its context (room-context.ts): past the shutdown deadline its writes are dropped or refused wherever it resumes.
+        res = await inRequest({ over: () => hub.late }, () => route(incoming, srv));
       } catch (e) {
         release();
         throw e;
+      }
+      // A write answered after the room stopped or past the shutdown deadline was dropped (it cannot be part of the saved session): say so, don't say 200.
+      if (res && (hub.session.store.closed || hub.late) && incoming.method !== "GET" && incoming.method !== "HEAD" && incoming.method !== "OPTIONS") {
+        budgetHeld.get(res)?.();
+        liveCalls.get(incoming)?.drop();
+        res = bad(CLOSING, 503);
       }
       // An upgrade has no response; a body is released when its last byte has gone (or the client left).
       // A read has done its work when its handler returns: a slow client on a streamed answer (the Mac app download) isn't work in flight for a
@@ -545,6 +555,8 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
             msg = { ...msg, event: { ...msg.event, data } };
           }
           if (agent && msg.type === "patch" && msg.key === "triage") return;
+          // A proposal is for people to approve: agents hear of wiki changes only once they are written.
+          if (agent && msg.type === "wiki" && msg.kind === "ingest") return;
           ws.send(JSON.stringify(msg));
         });
         (ws as any).off = off;
@@ -586,8 +598,13 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           sockets.get(ws.data.deviceId)?.delete(ws);
           if (!sockets.get(ws.data.deviceId)?.size) {
             sockets.delete(ws.data.deviceId);
-            s.touchDevice(ws.data.deviceId, { micOn: false, level: 0 });
-            for (const sh of s.shares()) if (sh.deviceId === ws.data.deviceId && sh.status === "live") s.endShare(sh.id, "ended", { lost: true });
+            // A window closing while the room shuts down finds the store sealed: nothing left to tidy.
+            try {
+              s.touchDevice(ws.data.deviceId, { micOn: false, level: 0 });
+              for (const sh of s.shares()) if (sh.deviceId === ws.data.deviceId && sh.status === "live") s.endShare(sh.id, "ended", { lost: true });
+            } catch (e) {
+              if ((e as NodeJS.ErrnoException)?.code !== "ESEALED") throw e;
+            }
           }
         }
       },
@@ -1222,6 +1239,19 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     return json({ url: u.toString(), expiresInSeconds: 60 });
   }
 
+  // The project wiki (12.8). People read, search and edit; agents use the jam_wiki_* tools and can't edit pages.
+  if (path === "/wiki" || path.startsWith("/wiki/")) {
+    if (paired?.kind === "agent") return bad("That's for people; agents use the jam_wiki_ tools.", 403);
+    // Who writes is who is signed in: a paired person's own device, or the host's window as its person. Never a
+    // personId in the body, which any caller could fill in (HUMAN_ONLY above already refused other loopback callers).
+    const p = paired ? (paired.personId ? s.person(paired.personId) : undefined) : hostWindow ? s.person(s.store.setting<string>("hostPersonId", "")) : undefined;
+    // Every change to the wiki names a person, the host's own window included.
+    if (req.method !== "GET" && !p) return bad("Pick who you are in this window first.", 403);
+    const who = { id: p?.id ?? null, name: p?.name ?? "Someone" };
+    const r = await wikiRoute(hub.wiki, req.method, path, url, body, who);
+    if (r) return Response.json(r.body, { status: r.status, headers: { "cache-control": "no-store" } });
+  }
+
   // The Tasks board (4.1): proposals wait here until a person acts. Only people act on them: an agent's credential is refused
   // (HUMAN_ONLY), and a window must know who is using it so the record says who sent or dismissed what.
   if (path === "/triage" && req.method === "GET") {
@@ -1233,8 +1263,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
   m = path.match(/^\/triage\/([\w-]+)(?:\/(send|add|merge|replace|dismiss))?$/);
   if (m && req.method !== "GET") {
     const who = actor();
-    if (!who.id && !hostWindow) return bad("Pick who you are in this window first.", 403);
-    const edit = { text: body?.text, mode: body?.mode, targets: body?.targets, counterparts: body?.counterparts, workstream: body?.workstream, kind: body?.kind };
+    // A wiki card writes pages under the name of whoever accepts it, so it needs a person even in the host's window.
+    if (!who.id && (!hostWindow || s.board.get(m[1])?.type === "wiki")) return bad("Pick who you are in this window first.", 403);
+    const edit = { text: body?.text, mode: body?.mode, targets: body?.targets, counterparts: body?.counterparts, workstream: body?.workstream, kind: body?.kind, pages: body?.pages };
     const verb = m[2];
     const r = !verb
       ? req.method === "PATCH"

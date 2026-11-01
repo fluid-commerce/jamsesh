@@ -1,5 +1,6 @@
 // Network: makes the host reachable at https://<name>.duckdns.org from anywhere.
 // DuckDNS name -> Let's Encrypt cert (DNS-01) -> router port forward -> self-check.
+import { assertLive } from "../room-context";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { join } from "node:path";
@@ -115,6 +116,7 @@ export class Network {
   /** A first certificate often fails while DNS settles: try again after 2, 5, then 15 minutes. */
   private async certWithRetry(attempt = 0) {
     await this.ensureCert();
+    if (this.shut) return;
     const delays = [2, 5, 15];
     if (!this.cfg?.enabled || this.stopping || this.shut) return; // switched off while the order ran: no retry is scheduled
     if (this.st.cert?.state !== "ok" && attempt < delays.length) {
@@ -124,8 +126,12 @@ export class Network {
   }
 
   /** The hub is shutting down: turns everything off for good (a request still waiting on an order can't start anything after this). */
+  /** Aborts an order still running when the room closes. */
+  private abort = new AbortController();
+
   async close(): Promise<boolean> {
     this.shut = true;
+    this.abort.abort();
     this.cfgGen++; // any setup still waiting is stale
     // Not queued behind a setup or turn-off in the lane: the router is asked at once (stop() waits only for a mapping in flight).
     const gone = await this.stop();
@@ -185,6 +191,7 @@ export class Network {
 
   /** Issues (or renews) whatever is missing or within 30 days of expiry. Concurrent calls share one run. */
   ensureCert(force = false): Promise<void> {
+    if (this.shut) return Promise.resolve();
     if (this.issuing) return this.issuing;
     const d = this.domain();
     if (!d || !this.cfg?.enabled || this.shut) return Promise.resolve(); // nothing is ordered for a name that is switched off or a host that is closing
@@ -203,7 +210,7 @@ export class Network {
     this.issuing = (async () => {
       try {
         for (const kind of todo) {
-          const b = await issueOne(kind, { domain: d, token: cfg.token, store: this.store, staging: cfg.staging, f: this.fetchFn, onProgress: (s) => (this.st.cert = { state: "issuing", step: s }) });
+          const b = await issueOne(kind, { domain: d, token: cfg.token, store: this.store, staging: cfg.staging, f: this.fetchFn, signal: this.abort.signal, onProgress: (s) => (this.st.cert = { state: "issuing", step: s }) });
           if (this.shut) break; // closing: an order that finished late saves and announces nothing
           this.store.save(b, cfg.staging);
           this.st.cert = { state: "issuing", step: "Saved" };
@@ -311,7 +318,9 @@ export class Network {
     const p = url.pathname.slice("/api/net/".length);
     if (req.method === "GET" && p === "status") return json(this.status());
     if (req.method !== "POST") return json({ error: "not found" }, 404);
+    assertLive();
     const body: any = await req.json().catch(() => ({}));
+    assertLive();
     if (p === "config") {
       const gen = ++this.cfgGen;
       const d = parseDomain(body.domain);
@@ -326,9 +335,11 @@ export class Network {
         if (gen !== this.cfgGen) return json({ error: "Another change was made while this one was being checked. Try again." }, 409);
         if (this.shut) return json({ error: "The host is closing." }, 503);
         const r = await updateIp(d, token, this.fetchFn);
+        assertLive();
         if (!r.ok) return json({ error: r.error ?? "DuckDNS didn't accept that name and token." }, 400);
         if (gen !== this.cfgGen || this.shut) return json({ error: "Another change was made while this one was being checked. Try again." }, 409);
         const stopped = await this.stop();
+        assertLive();
         if (!stopped) {
           await this.start().catch(() => {}); // the earlier setting is still the one saved: its services resume
           return json({ error: "The router hasn't confirmed closing the earlier port forward. Try again, or remove it in the router's settings." }, 409);
@@ -336,6 +347,7 @@ export class Network {
         this.st.publicIp = r.ip;
         this.st.dns = "ok";
         await this.issuing?.catch(() => {}); // an order for the old name finishes first; its certificate is replaced by the check on names
+        assertLive();
         if (this.shut) return json({ error: "The host is closing." }, 503);
         if (gen !== this.cfgGen) {
           // A turn-off (or newer setup) arrived while the order for the old name finished: the queued request decides, this one saves and starts nothing.
@@ -358,6 +370,7 @@ export class Network {
     if (!this.cfg) return json({ error: "Set up a name first." }, 400);
     if (p === "check") {
       await this.check();
+      assertLive();
       return json(this.status());
     }
     if (p === "issue-cert") {
@@ -373,6 +386,7 @@ export class Network {
         return json(this.status(), gone ? 200 : 409);
       }
       await this.openRouter();
+      assertLive();
       return json(this.status());
       });
     }
@@ -383,6 +397,7 @@ export class Network {
       return this.inLane(async () => {
       // Off is saved either way, but a forward the router didn't confirm closing is said so, and Retry stays available to try again.
       const gone = await this.stop();
+      assertLive();
       let saveError: string | undefined;
       try {
         this.saveConfig({ ...this.cfg!, enabled: false });

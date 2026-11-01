@@ -1,0 +1,135 @@
+// The link graph as data: shaped from the hub's nodes and edges, with the lookups the canvas needs.
+import { asCategory, CATEGORIES, type Category, type RawGraph } from "./types";
+
+/** As many pages as a vault holds (hub MAX_PAGES): the map shows every page; the cap only guards a malformed reply. */
+export const MAX_NODES = 1500;
+/** And as many links as the hub sends (GRAPH_EDGES_MAX): a malformed reply can't ask the layout for millions. */
+export const MAX_EDGES = 6000;
+const arr = <T>(v: T[] | undefined | null): T[] => (Array.isArray(v) ? v : []);
+
+export interface GNode {
+  id: string;
+  title: string;
+  category: Category;
+  backlinks: number;
+  /** Links in and out; what keeps a hub of the map near its middle. */
+  degree: number;
+  r: number;
+  x?: number;
+  y?: number;
+  vx?: number;
+  vy?: number;
+  fx?: number | null;
+  fy?: number | null;
+}
+export interface GEdge {
+  source: string;
+  target: string;
+}
+export interface Graph {
+  nodes: GNode[];
+  edges: GEdge[];
+  /** Who each page is linked with, either direction. */
+  near: Map<string, Set<string>>;
+}
+
+/** A node's radius from how many pages link to it; the square root keeps one popular page from swallowing the map. */
+export const radiusFor = (backlinks: number, scale = 1) => (4.5 + Math.sqrt(Number.isFinite(backlinks) ? Math.max(0, backlinks) : 0) * 3.2) * scale;
+
+/** Whatever the hub sent, made safe to draw: no repeats, no dangling or self links, bounded, finite numbers. */
+export function shapeGraph(raw: Partial<RawGraph> | null | undefined, scale = 1): Graph {
+  const seen = new Map<string, GNode>();
+  for (const n of arr(raw?.nodes)) {
+    const id = n && typeof n.id === "string" ? n.id : "";
+    if (!id || seen.has(id)) continue;
+    const backlinks = Number.isFinite(n.backlinks) && n.backlinks > 0 ? Math.floor(n.backlinks) : 0;
+    seen.set(id, { id, title: String(n.title || id).slice(0, 120), category: asCategory(n.category), backlinks, degree: 0, r: radiusFor(backlinks, scale) });
+  }
+  const edges: GEdge[] = [];
+  const have = new Set<string>();
+  for (const e of arr(raw?.edges)) {
+    if (edges.length >= MAX_EDGES) break;
+    if (!e || e.from === e.to || !seen.has(e.from) || !seen.has(e.to)) continue;
+    const key = `${e.from}\u0000${e.to}`;
+    if (have.has(key)) continue;
+    have.add(key);
+    edges.push({ source: e.from, target: e.to });
+  }
+  const degree = new Map<string, number>();
+  for (const e of edges) for (const id of [e.source, e.target]) degree.set(id, (degree.get(id) ?? 0) + 1);
+  let nodes = [...seen.values()];
+  for (const n of nodes) n.degree = degree.get(n.id) ?? 0;
+  if (nodes.length > MAX_NODES) {
+    nodes = nodes.sort((a, b) => b.degree - a.degree || a.id.localeCompare(b.id)).slice(0, MAX_NODES);
+    const keep = new Set(nodes.map((n) => n.id));
+    for (let i = edges.length - 1; i >= 0; i--) if (!keep.has(edges[i].source) || !keep.has(edges[i].target)) edges.splice(i, 1);
+  }
+  const near = new Map<string, Set<string>>(nodes.map((n) => [n.id, new Set<string>()]));
+  for (const e of edges) (near.get(e.source)!.add(e.target), near.get(e.target)!.add(e.source));
+  return { nodes, edges, near };
+}
+
+/**
+ * The small map beside a page, made from the page's own full link lists (the hub's page route sends them all), so a page
+ * with many neighbours shows every one even when the global map is thinned.
+ */
+export function localOf(page: { slug: string; title: string; category: string; links: { slug: string; exists: boolean }[]; backlinks: { slug: string; title: string }[] }, metas: { slug: string; title: string; category: string; backlinks: number }[], scale = 1): Graph {
+  const by = new Map(metas.map((m) => [m.slug, m]));
+  const ids = new Set<string>([page.slug]);
+  const edges: { from: string; to: string }[] = [];
+  for (const l of page.links) if (l.exists && by.has(l.slug)) (ids.add(l.slug), edges.push({ from: page.slug, to: l.slug }));
+  for (const b of page.backlinks) if (by.has(b.slug)) (ids.add(b.slug), edges.push({ from: b.slug, to: page.slug }));
+  const nodes = [...ids].map((id) => {
+    const m = by.get(id);
+    return { id, title: m?.title ?? (id === page.slug ? page.title : id), category: m?.category ?? page.category, backlinks: m?.backlinks ?? 0 };
+  });
+  return shapeGraph({ nodes, edges }, scale);
+}
+
+/** One page and the pages it links with, for the small map beside a page. */
+export function localGraph(g: Graph, slug: string): Graph {
+  const around = g.near.get(slug);
+  if (!around) return { nodes: [], edges: [], near: new Map() };
+  const keep = new Set([slug, ...around]);
+  const nodes = g.nodes.filter((n) => keep.has(n.id)).map((n) => ({ ...n }));
+  const edges = g.edges.filter((e) => keep.has(e.source) && keep.has(e.target) && (e.source === slug || e.target === slug)).map((e) => ({ ...e }));
+  const near = new Map<string, Set<string>>(nodes.map((n) => [n.id, new Set<string>()]));
+  for (const e of edges) (near.get(e.source)!.add(e.target), near.get(e.target)!.add(e.source));
+  return { nodes, edges, near };
+}
+
+/** The order the keyboard walks the map in: by category, then title. */
+export const walkOrder = (g: Graph) => [...g.nodes].sort((a, b) => a.category.localeCompare(b.category) || a.title.localeCompare(b.title)).map((n) => n.id);
+
+const CATEGORY_RANK = new Map(CATEGORIES.map((c, i) => [c as string, i]));
+
+/** Pages from most to least important: backlinks first, then category (people and workstreams lead), then title. */
+export const byImportance = (g: Graph) =>
+  [...g.nodes].sort((a, b) => b.backlinks - a.backlinks || (CATEGORY_RANK.get(a.category) ?? 9) - (CATEGORY_RANK.get(b.category) ?? 9) || b.degree - a.degree || a.title.localeCompare(b.title));
+
+/** Which nodes get a name drawn without hovering: the most important `max`. */
+export function labelled(g: Graph, max: number): Set<string> {
+  return new Set(byImportance(g).slice(0, Math.max(0, max)).map((n) => n.id));
+}
+
+/** The most names the big screen draws and makes room for: past this many they couldn't be read anyway, and finding room for each costs more than a frame. */
+export const NAME_BUDGET = 120;
+
+/** Every page with `min` or more backlinks, plus up to `extra` of the rest (only the smallest leaves go unnamed), at most `cap` in all. */
+export function labelledAtLeast(g: Graph, min: number, extra: number, cap = Infinity): Set<string> {
+  const all = byImportance(g);
+  const key = all.filter((n) => n.backlinks >= min);
+  return new Set([...key, ...all.slice(key.length, key.length + extra)].slice(0, cap).map((n) => n.id));
+}
+
+/** The nearest node under a point, if the point is within its radius plus a little slack. */
+export function nodeAt(nodes: GNode[], x: number, y: number, slack = 5): GNode | null {
+  let best: GNode | null = null;
+  let bestD = Infinity;
+  for (const n of nodes) {
+    if (n.x === undefined || n.y === undefined) continue;
+    const d = Math.hypot(n.x - x, n.y - y);
+    if (d <= n.r + slack && d < bestD) (best = n, (bestD = d));
+  }
+  return best;
+}

@@ -17,7 +17,7 @@ const tile = z.discriminatedUnion("kind", [
 ]);
 
 const stageShape = {
-  mode: z.enum(["board", "spotlight", "compare", "parity", "agents", "canvas", "custom", "layout", "welcome", "join"]),
+  mode: z.enum(["board", "spotlight", "compare", "parity", "agents", "canvas", "custom", "layout", "welcome", "join", "wiki"]),
   title: z.string().max(500).optional(),
   caption: z.string().max(2000).optional(),
   items: z.array(id).max(60).optional(),

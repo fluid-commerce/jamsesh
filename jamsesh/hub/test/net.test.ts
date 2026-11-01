@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dnsHasTxt, needsRenewal, parseDohTxt, safeError, waitForTxt } from "../src/net/acme";
@@ -152,5 +152,31 @@ describe("Network config", () => {
     const n = new Network(dir, f as any);
     (n as any).saveConfig({ domain: "jam.duckdns.org", token: "t", externalPort: 443, internalPort: 4443, enabled: false, staging: false });
     expect(statSync(join(dir, "net.json")).mode & 0o777).toBe(0o600);
+  });
+  test("once the room is closing nothing is issued, saved or mapped", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "net-"));
+    const seen: string[] = [];
+    const f = async (u: string) => (seen.push(u), resp("OK\n9.9.9.9\n\nUPDATED"));
+    const n = new Network(dir, f as any);
+    await Bun.write(join(dir, "net.json"), JSON.stringify({ domain: "jam.duckdns.org", token: "11111111-2222-3333-4444-555555555555", externalPort: 443, internalPort: 4443, enabled: true, staging: true }), {});
+    const n2 = new Network(dir, f as any);
+    let mapped = 0;
+    (n2 as any).mapper = { map: async () => (mapped++, { method: "none" }), unmap: async () => {} };
+    n2.close();
+    await n2.start();
+    await n2.ensureCert(true);
+    await n2.openRouter();
+    expect(seen).toEqual([]);
+    expect(mapped).toBe(0);
+    expect(n2.tlsOptions()).toBeNull();
+    void n;
+  });
+  test("a certificate order is not started once the room has closed: no account key is made", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "net-"));
+    const { issueOne, CertStore } = await import("../src/net/acme");
+    const ac = new AbortController();
+    ac.abort();
+    await expect(issueOne("apex", { domain: { fqdn: "jam.duckdns.org", sub: "jam" } as any, token: "t", store: new CertStore(join(dir, "tls")), f: (async () => resp("OK")) as any, signal: ac.signal })).rejects.toThrow();
+    expect(existsSync(join(dir, "tls", "account.key"))).toBe(false);
   });
 });

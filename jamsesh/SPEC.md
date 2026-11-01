@@ -2427,6 +2427,181 @@ started, taking in the export; every process that finds the damage opens the sam
 once. A new database takes in `context.json` (the export, or the file builds before the database wrote) once; a file that
 exists but isn't a complete, valid export fails the start instead of being skipped.
 
+### 12.8 The project wiki
+
+Each project keeps one wiki that outlasts its sessions (`hub/src/wiki/`). It is the project folder itself, so it opens as an
+Obsidian vault with nothing to set up:
+
+```text
+projects/<slug>/WIKI.md   the schema for people: how pages are kept (one topic per page, [[links]], citations, front matter)
+              index.md    every page by category; rebuilt by the hub after every change
+              log.md      one line per recent change, newest last (about 2 MB after a cut; it can be larger, up to 8 MB, while it waits for a commit; git holds the older ones, except lines cut at the hard limit or without a kept history)
+              raw/        sources: YYYY-MM-DD_slug.md, written once and never edited
+              wiki/       pages: <slug>.md
+              .git        one commit per change set, of the wiki's own files only, when `git` is installed (optional)
+              .wiki-state.json, .proposals/   hub bookkeeping (git-ignored; Obsidian hides dot-folders)
+```
+
+A page has front matter `type` (person, workstream, feature, decision, requirement, question, repo, topic), `workstreams`,
+`updated` and `sources` (source ids), then Markdown starting with `# Title`. API `category` is the plural of `type`
+(people, workstreams, features, decisions, requirements, questions, repos, topics). Citations in text are
+`(src: <source id>)` or `(src: <source id>, 14:32)` for a moment in a transcript, whose lines start `[14:32] Name: text`.
+
+**Feeding it.** Sources come from the transcript (every 15 minutes and at session end: non-banter speech, typed prompts, decisions
+and agents' questions; read forward from a per-session cursor that moves only after the source is written, a long stretch split
+into sources of 50,000 characters, a thin stretch kept for the next pass, and at session end whatever is left), documents (**Add to wiki**, `POST /api/wiki/sources`; `jam_source_add` for agents, 30 an hour), agents'
+`shipped` and `decision` updates (small `agent` sources; one that can't be written is logged, kept in `.wiki-state.json` and
+written at the next pass, by this session or the next), facts saved in the session (below), and people's page edits (`edit` sources holding the diff). An ingest
+reads up to 8 sources (60,000 characters) with the index and the pages they touch, using the **router** model, and proposes up to
+15 whole pages. A source longer than 60,000 characters is read in parts, each from where the last ended (`read` offsets in the
+state); it counts as read only once its end has been. The pages it touches go to the model whole (up to 60,000 characters in all), and it may only replace an existing
+page it was given whole; a proposal for any other existing page is dropped. A proposal's base revision is the one the model
+was shown, so a page a person edits during the model call is stale on the card and skipped on accept. The maintainer's rules are fixed in code; people, workstreams, the index, sources,
+pages and the vault's `WIKI.md` reach the model as data inside tags named with a random word per call, which nothing in the data
+can close. The model can only return wiki pages (a schema), so it cannot assign work or change settings. With no model the
+sources wait, and lint says so. A source is read (`ingested`) once its card is accepted or dismissed, or when an ingest finds
+nothing in it worth a page; until then the open card holds it, so it isn't proposed twice.
+
+**Approval.** One card per ingest on the Tasks board (`type: "wiki"`), not one per page: a busy session raises a card every
+15 minutes at most, and each page has a diff and a toggle. Accepting (`POST /api/triage/:id/add`, optional `{pages:[slug]}`)
+writes the checked pages; unchecked ones are dropped. A page a person edited since the proposal (revision no longer matches) is
+skipped and listed in `card.wiki.skipped`; if every checked page is stale the answer is 409. Each page is written whole (a temp
+file, then a rename) and recorded in the proposal as it lands; a write that fails, or a log or index that can't be written, is a
+500 that keeps the card open, and accepting again finishes without writing a page twice or logging twice (the log line
+carries the proposal's key as an Obsidian `%%comment%%`). A finished accept is recorded in the proposal before the card
+closes; if the hub stops in between, the next start closes the card with what was recorded. People's own edits
+(`PUT /api/wiki/page/:slug`) apply directly. The proposal's full text, and the card as raised, are kept in the project's
+`.proposals/<card>.json`, not in the session: a new session raises every open proposal on its own board again (pages edited
+since marked `stale`). The card's diff per page is cut at 6,000 characters, at a line, with a note of how many changed lines are left out and `cut: true`;
+`GET /api/wiki/proposal/:card/:slug` (people only) returns the whole change (`{diff, added, removed, meta}`), and the card offers it as
+"Show the whole change". A change that shrinks a page by a third or more is flagged on the card. The card shows the first 400 diff
+lines and says how many more there are, with a button that shows them all. Before each page is written the proposal records the intent (the page and the hash of the exact bytes it will hold); nothing is
+added to the page. A page that holds exactly those bytes counts as written, whoever put them there: if a person made the same edit, the
+vault holds what was proposed, so recording the proposal as applied and its sources as read is the right outcome, not a misrecord. A
+page that differs (edited since, or never written) is not counted, and an accept skips a page edited since it was proposed. A
+person's edit through the app reconciles any unrecorded write first. Pages changed by hand in the vault (Obsidian) are found at start,
+each pass and before an app edit, by hash against `.wiki-state.json` `seen` (every page every time: an editor can keep the file time),
+and filed as an edit source ("Someone in the vault") with a log line, an index rebuild and a commit; a page deleted by hand is filed the
+same way ("deleted a page") and leaves the index. The first look only records. Filing records its intent first (`filing`: page, hash,
+source id) and the wiki's own writes theirs (`own`: page, hash of the bytes); the next pass settles either, so a state file that fails
+to save never files a change twice nor takes the wiki's own write for a hand edit. A change to a page's category or workstreams alone
+is a change. Before a pass writes anything, every cursor and offset in the state file is checked against what it points into. `GET /api/wiki/proposal/:card/:slug` serves the diff
+made from the page as proposed, stored with the proposal. At session end the transcript, agent reports and queue are saved to the
+sources first and on their own (5 s budget), never behind an ingest; the ingest then gets 15 s. From the first moment of shutdown the hub answers every request that would add something with 503 and
+the brain takes no new pass; what is already under way (requests being answered, body and all; speech still waiting, transcribed at
+once; the brain's pass) finishes first, for up to 10 s in total (requests first, so an upload still sending its body is in before the speech is flushed), and only then is the local whisper stopped. The store's events are then sealed
+before that capture (everything is sealed once the hub has stopped): a write past it throws `ESEALED`, which a request answers with
+503, so nothing lands after the capture unseen. Once the capture is done and the hub has stopped, the store is sealed for everything: every write path (documents, settings, replies, events, digests, voiceprints, the team store) drops the write with a logged warning and returns, never throwing, so a late timer, refresh or host job can neither corrupt anything nor fail unhandled; such a write is not part of the session record, which was taken at the capture, and a request answered after that point answers 503. Known limit (owner-accepted): a port mapping or TXT record can be left behind if the app is killed mid-close. At close the network stops starting new work (no certificate order is started, saved or mapped, and an abort signal stops an order before its account key or DNS record); a mapping that is up is taken down by `stop()`, and an answer the router never gives is not retried at the next start. Commits and commit debt: the wiki commits through a private git index (`GIT_INDEX_FILE`): HEAD is read into it, the wiki's own files are added there (named on stdin, however many), and the branch is moved with a compare-and-swap on the HEAD it started from (retried from the new HEAD if someone else committed meanwhile). The commit holds git's index lock (waiting up to a second) while the branch moves and the person's index entries for the files the wiki committed follow HEAD, only where they had staged nothing different there; if the lock cannot be taken no commit is made and it is tried at the next pass. The paths and both commits are written to `.git/jamsesh-follow.json` before the branch moves and the note is deleted only once the index is in place, so a failure, a busy index or a restart is finished by the next pass (and at the next sync); if the index cannot be read it is left as it was. Git runs with an allowlisted environment (`PATH`, `HOME`, `LANG`, `TMPDIR`, plus `GIT_INDEX_FILE` and `GIT_TERMINAL_PROMPT`; nothing of the hub's, no secret, no `GIT_*` of the process) and with hooks, the file-system monitor, ssh, external diff and textconv, pager, editor, credential helpers and `file://` transports switched off, the user and system git config not read. No clean/smudge filter or attribute can run, and git never opens a vault file: each file is read once in process (opened without following a link, checked to be a regular file on the open handle, read whole), its blob id is computed from those bytes (never `git hash-object` or `git add`), ownership of a page is decided from those same bytes (a page's revision is a (12-hex-character) hash of its bytes, so a different file does not, except by a collision, share it), a file that changes under the read (size or times differ after it) is an error rather than a mixed snapshot, the commit message goes to git on stdin (never in a command line),  and the bytes are written into the repository by `git fast-import`, in batches of about 8 MB (a batch is written once it reaches that size, so the last file in it can take it up to 16 MB over), and into the private index by id; nothing is reopened by path. log.md keeps the newest changes only. With git history kept, it is cut back (at a line start, through the same atomic writer, to about 2 MB) right after a commit that included it, when the file on disk is exactly what was committed, so the lines that go are in history by construction; until then it grows, and at 8 MB it is cut regardless. With no git history kept, past 3 MB it is cut and the cut lines are gone. History shows the recent entries. Which changes have been logged (a card and its pages, a source) is remembered in `.wiki-logged.json` beside the vault (the newest 8,000 keys; git-ignored; a damaged one is kept aside as `.wiki-logged.json.damaged` and replaced), so a keyed line is written first with its key in it and the key remembered after (a failure there leaves the line, and a retry repairs the key); a line is not cut from the log while its key is not remembered (except at the 8 MB hard limit); a retried accept or the catch-up does not log again a change whose line has been cut away (unless the file is lost or full of newer keys; an unreadable file makes the catch-up wait). A file over 16 MB is refused before it is read, logged, and left out (a link or a folder at a vault name stops the commit; at a page's name it is left out). Each commit attempt reads a file once, one at a time, and keeps none; change detection reads files separately, and the page, index and search code read pages through the same size cap. What changed is found by comparing those ids with `ls-tree HEAD` (the archive of read sources is not listed in HEAD or read again while its tree, its folder's time and its file names are unchanged; its file names are still read). Known limit (owner-accepted): the check covers the file itself, not its parent folders beyond `wiki/`, `raw/` and `raw/archive/` being real folders; swapping a folder for a link between the folder check and the open needs a local attacker with write access to the vault. The branch is read once by its exact name (`refs/heads/...`) and the move is made on that name; the note records it, and a note is accepted only if every sha is 40 hex characters, the ref is a branch name, and every path is a page file (`wiki/<name>.md`), a source file (`raw/<id>.md`, `raw/archive/<id>.md`) or one of the vault's top-level files (a directory or anything else is refused); a note is applied only while its branch is the checked-out one and is kept for when it is: otherwise it is kept, logged and not applied. After a refused `update-ref` one look at the exact ref decides whether it moved; if that look fails the note is kept. The vault sync treats a `wiki/` that is a link, missing (when pages were known) or unreadable as an error that stops the pass, never as pages deleted. A page a person is editing, staged or not, is theirs until the vault sync has filed it, and is not committed under an unrelated change. Filing a hand edit is the wiki's job, so the sync commits the work-tree version of that page as the person's edit; what they had staged on that page is not kept apart. What git reports as changed among the wiki's own page and source files since HEAD (work tree against history, deletions and moves included) is committed with every wiki commit, so a failed commit is made at the next one and nothing has to be remembered, across a restart too; if git cannot say, nothing is committed that time. Every request runs under a context (`room-context.ts`) that its awaits, timers and jobs inherit; shutdown sets a deadline, and past it any store or vault write by work carrying that context is dropped or refused (503 for the request), wherever it resumes, while shutdown's own work and the room's timers carry none. Known limit (a deliberate decision): a canvas call already running in the external canvas process at the shutdown deadline cannot be cancelled and may land in the live canvas after the final snapshot; its request answers 503, and the canvas ends with the room moments later. Every timer the room owns runs through one registry that closing ends first; a window closing after the seal is let go quietly. A card shows how each page is filed (category, workstreams) before and after, in the card and in the whole change, and an unsaved edit is held outside the page view (the editor reopens into it after a page link, a tab or host-mode switch or the Wiki view closing; Save or Cancel drops it; closing or reloading the window asks while one is held). A long source is drawn a window of lines at a time. Pages a failed accept already wrote stay part of its
+record whatever is checked on the retry; dismissing the card after a partial accept still gives them the log line, index and commit.
+When the model's answer holds an update to an existing page it wasn't shown whole, that part isn't written and the card's sources
+stay pending when it closes (`.wiki-state.json` `need` lists the pages to show first next time), so nothing it said is lost with its
+source. Card payload: `card.wiki = {kind: "ingest"|"lint"|"answer", summary, changes:[{slug,title,category,op:"create"|"update",diff,cut?,stale,added,removed,largeDeletion,meta:{from?:{category,workstreams},to:{category,workstreams}}}], findings?, applied?, skipped?}`.
+
+**Query and lint.** `POST /api/wiki/query {question, file?}` answers from the best-matching pages with `[[links]]`; a substantial
+answer with `file:true` raises an `answer` card that creates a page. Its source is unread until that card is resolved; if the
+card can't be raised, an ingest reads it. `POST /api/wiki/lint` finds orphans, broken links, pages not
+updated in 45 days, sources not yet ingested and (with a model) contradictions and stale claims, and raises one `lint` card of
+findings (one open at a time; a changed result replaces it).
+
+**Hub API** (people only; an agent credential gets 403). Writes are people-only routes (`HUMAN_ONLY`): on the host only its own
+windows (the window key), elsewhere a paired device with its person; the writer is that person, never a `personId` in the body.
+A window with no person picked, the host's included, gets 403 "Pick who you are in this window first" for any wiki write,
+and for accepting or dismissing a wiki card.
+
+| Route | Answer |
+|---|---|
+| `GET /api/wiki/pages` | `{ready, project, pages:[{slug,title,category,summary,links,backlinks,updated,mtime}]}` |
+| `GET /api/wiki/page/:slug` | `{slug,title,category,frontMatter,markdown,rev,backlinks:[{slug,title}],links:[{slug,title,exists}],sources:[{id,title,kind,ts,exists}]}` |
+| `PUT /api/wiki/page/:slug` | body `{markdown, rev?, title?, category?}` (the same text under a different `category` is a change: it is written and logged as an edit source); `rev` is required to change a page and absent to create one; 409 `{error,current}` when stale |
+| `GET /api/wiki/search?q=` | `{results:[{slug,title,category,snippet,score}]}` |
+| `GET /api/wiki/graph` | `{nodes:[{id,title,category,backlinks}],edges:[{from,to}],trimmed?}`; each page keeps its strongest links (by how linked-to the target is), an even share of a 6,000-edge budget (at most 8 a page); the page route has every link, the index lists 20 a page |
+| `GET /api/wiki/log` | `{entries:[{ts,text,pages}]}` newest first |
+| `GET /api/wiki/sources`, `GET /api/wiki/source/:id` | the source list (with `ingested`), one source's text |
+| `POST /api/wiki/sources` | `{title, text}`, `{title, url}` (kept as a link; never fetched) or `{title, attachment}` (text file or PDF; a PDF is read by the router model, 503 without a key) |
+| `POST /api/wiki/ingest`, `/query`, `/lint` | run now; see above |
+
+Changes arrive as a bus message `{type:"wiki", kind:"ingest"|"edit"|"apply"|"source", touched:[slug], by, at}`. `ingest` (a card is
+raised) carries no page names (`touched: []`) and is not sent to agent sockets: a proposal is for people to approve, and the stage only
+pulses pages that are written. `apply` (a card is accepted) and `edit` name the pages.
+
+**Durability.** A proposal and its card share one id (`tri_…`), the proposal file written first; on start a proposal without its card is
+raised again under that id, and an open wiki card without its proposal is closed (its sources are read again). Agent shipped and
+decision reports are read from the session's events by a cursor in `.wiki-state.json` that moves only past a written source. Every
+source except the room's transcript chunks (a line every 15 minutes would bury History) gets one keyed log line (`%%src:<id>%%`),
+written again at the next change, pass or start if the first write failed. An agent report's source is named by its event, so a
+replay finds it. When `raw/` passes 4,800 sources the oldest read-in ones move to `raw/archive/` (still readable and citable by id).
+`.wiki-state.json` is checked field by field when read (cursors and offsets must be safe non-negative integers); a wrong shape, a cursor past the last event, or an offset past the end of its source is treated as damaged. An event
+longer than one source is written in parts, with its offset in the state file. A damaged `.wiki-state.json` stops ingest (a copy is kept
+as `.wiki-state.json.damaged`) rather than restarting from nothing. The project folder must be a real folder directly inside the
+projects folder (never a link, never behind one); otherwise the session uses its own folder.
+
+**Agents.** `jam_wiki_read`, `jam_wiki_search`, `jam_wiki_query` and `jam_source_add` (no tool edits pages). `jam_join` returns
+the wiki's index (page names by category) and the agent's workstream pages instead of the "settled points" pointer, with the whole
+briefing kept under 6,000 characters (about 1,500 tokens); what doesn't fit is named for `jam_wiki_read`.
+
+**Safety.** Page names are slugs (`[a-z0-9-]`, 64 characters), so no path can leave `wiki/`. `wiki/`, `raw/` and `.proposals/`
+must be real folders in the project folder (resolved to its real path) and the vault's own files plain files: a link anywhere
+on the way is refused, never followed. Writes are atomic (a page: temp file and rename; a source: temp file linked to a name that must be new), refuse symlinks and are capped (40,000 characters a page, 1,500 pages, 200,000 characters and 6,000 files of sources). Sources are
+created exclusively and never rewritten. Model output is cleaned of front matter and only ever lands in `wiki/`.
+
+**The fact list.** The brain's periodic curation pass no longer runs in a hub (the ingest replaces it). The session's fact store
+stays as the live, in-session layer: "remember this" and context cards added on the board save a fact that agents get in their
+briefing at once, before any wiki card is approved, and that the curator can retire. Every fact saved (made, added, merged or
+replacing another) is also filed into the wiki as a source, so it reaches the pages through the same approval cards; the
+agent briefing reads both (the session's settled points, then the wiki section). The first time a project has a wiki, its `context.json` and the session's active facts become pages
+(`decisions`, `requirements`, `open-questions`, `project-brief`, one page per workstream), without a model, with a source holding the
+original text. It only creates: a page already there is left alone, and if a person wrote it the source stays unread so the next
+ingest proposes the merge on a card. It is marked done last; an interrupted run starts again from the same source.
+
+### 12.9 The Wiki tab, the graph and the big screen's wiki mode
+
+The **Wiki** tab sits between **Work** and **Tasks** in people's apps; the host has a **Wiki** button (key 5) that swaps the
+stage area for the same view. Code: `web/src/wiki/`.
+
+- **Index.** Pages grouped by category (people, workstreams, features, decisions, requirements, open questions, repos,
+  topics) with a count of backlinks, and search: the hub's `GET /api/wiki/search` after 200 ms, titles and summaries
+  filtered locally until it answers or if it can't. `/` focuses search, Up and Down move through the list.
+- **Page.** The body is rendered Markdown at 16.5 px on a 70-character measure. `[[page]]`, `[[page|alias]]` and
+  `[[page#heading]]` are links (a link to a page that doesn't exist is dashed, and opens an empty page to start); `(src: id, 14:32)`
+  and `[[raw/id]]` are small citation chips. A citation opens the source's text in a dialog and marks the line that starts
+  `[14:32]` (the transcript source format). The page also lists its Sources and its Backlinks, and a small local graph of the
+  page and its direct neighbours. Edits to a page by people collapse to one line ("N edits by people, in History").
+- **Editing.** Edit puts the whole body in a text box; Save (Cmd/Ctrl+Enter) is `PUT /api/wiki/page/:slug` with the `rev` the
+  edit started from (`wiki/draft.ts`): a refresh while editing never changes it, and a newer page shows the banner at once. A stale `rev` (409) shows "Someone saved this page while you were editing" with **Use their version** or **Save over
+  theirs**. Nothing is queued offline: a failed save leaves the text where it is. **History** is `GET /api/wiki/log`, for the
+  page or everything.
+- **Add to wiki.** Write or paste (title and text), a link, or a file (Markdown and text are read in the browser and sent as
+  text; a PDF is uploaded with Phase 4's `uploadAttachment` and sent as `{attachment}`; a drop anywhere on the dialog works).
+  The check on file types and sizes is `checkFile` from `shared/attach.tsx`.
+- **Wiki cards on the Tasks board** (`card.type === "wiki"`) show the summary and one row per page with a checkbox, New or
+  Changed, a diff that opens on demand and a note when someone edited the page since. **Add N pages** is
+  `POST /api/triage/:id/add {pages}`; a lint card lists its findings and has **Done**.
+- **The graph.** `d3-force` lays out; a plain 2D canvas draws. Nodes are coloured by category, sized by the square root of their
+  backlinks; edges are links. Hover (or keyboard focus) lights a node and its neighbours and dims the rest; click opens the
+  page; dragging moves a node. The layout takes the shape of its room (wide on a screen, tall on a phone), a loose page is held
+  near the rest, and the whole map is fitted in view. Names are drawn for the biggest pages and for what is highlighted, never
+  on top of each other. The frame loop only runs while something moves. **Keyboard**: Tab to the map, Left and Right walk the
+  pages (by category, then title), `N` hops to a linked page, Enter opens, Escape clears; the page is announced
+  (title, kind, backlinks, what it links with). **Phone**: fewer names, a tap selects and shows a card with **Open**.
+  **Reduced motion**: the map settles once without animating, hover snaps, and a pulse is a still ring.
+- **Work tab.** The retired fact list is replaced by a card per kind (Decisions, Requirements, Open questions) found by page category: every page of the category counts one, and a list page (`decisions`, `requirements`, `open-questions`) counts its bullets. A card opens the list page, or the newest page, in the Wiki tab (`wiki/nav.ts`) and names the latest. A project with none yet says so and links to the wiki.
+- **Names on the map.** A name goes below its node, then above, to the right, to the left, and is skipped when every spot would sit on another name or another node (the page being pointed at is always named).
+- **Pulse.** The hub's `{type:"wiki", touched:[slug]}` message (an ingest raised, a page edited or applied) pulses those
+  pages for 2.4 seconds and refetches the index after 400 ms; reconnecting refetches too.
+- **Big screen.** `StageMode` gains `"wiki"`. `Stage.tsx` draws `WikiStage`: the graph at twice the size, with the title
+  "What we know", a legend and, for seven seconds after an ingest, "Just updated &lt;pages&gt;". The brain's `show_on_screen`
+  takes `mode: "wiki"` ("JamSesh, show the wiki graph") and pins it unless told not to; the wiki view's **On the big screen**
+  button puts it up too.
+- **Safety.** Page text never becomes raw HTML: markdown-it runs with HTML off; only `http(s):`, `mailto:` and in-page links
+  stand (`javascript:`, `data:`, `vbscript:`, `file:` and relative paths are shown as text); pictures are not fetched (their
+  alt text stands in, so a page can't phone home); outside links get `target="_blank" rel="noopener noreferrer nofollow"`.
+  DOMPurify then sanitises the result with a short tag and attribute list, and if it can't run (no DOM) the page is shown
+  escaped. Titles are rendered as text by React.
+- **Libraries** (pinned in `web/package.json`): `d3-force` 3.0.0 (ISC), `markdown-it` 14.1.0 (MIT), `dompurify` 3.4.0
+  (MPL-2.0 OR Apache-2.0). Their dependencies are ISC (d3-quadtree, d3-dispatch, d3-timer), MIT (mdurl, linkify-it, uc.micro,
+  punycode.js) and BSD-2-Clause (entities); `markdown-it` also lists `argparse` (Python-2.0), used only by its command-line
+  tool and not in the bundle. Types: `@types/d3-force`, `@types/markdown-it` (MIT, dev only).
+
 ## 13. Host control and permissions
 
 The brain pilots the host machine as well as the big screen [B44]. Host control is on by default

@@ -19,6 +19,9 @@ import { ProjectKeeper } from "./projectkeeper";
 import { MAX_IMAGE_BYTES } from "./limits";
 import { Attachments, pdfText, type AttachmentRef } from "./attachments";
 import { seedFromProject } from "./carryover";
+import { readProjectContext } from "./carryover";
+import { projectsDir } from "./projects";
+import { WikiService } from "./wiki/service";
 import { Auth } from "./auth";
 import { KeepAwake } from "./awake";
 import { Network } from "./net";
@@ -42,6 +45,8 @@ export interface HubOptions {
   dataDir?: string;
   /** Defaults to <dataDir>/team when dataDir is given (tests), else ~/.jamsesh/team. */
   teamDir?: string;
+  /** The project wiki's folder; by default the project's own, or one inside the data directory. */
+  wikiDir?: string;
 }
 
 const HARNESS_TEXT = /^\s*<(task-notification|local-command-stdout|local-command-stderr|bash-input|bash-stdout|bash-stderr|system-reminder)>/;
@@ -116,6 +121,7 @@ export class Hub {
   keeper: ProjectKeeper;
   /** Images and files added to messages (SPEC 12.6). */
   attachments: Attachments;
+  wiki: WikiService;
   auth: Auth;
   /** The fonts canvases draw with this session: open ones fetched, others borrowed. Memory only. */
   fonts: FontService;
@@ -124,6 +130,11 @@ export class Hub {
   net: Network;
   /** Open WebSocket connections from people's devices (not the host's own screen). */
   peopleOnline = 0;
+  /** When shutdown stops waiting; work that began in a request and is still going then is over (room-context.ts). Infinity until shutdown. */
+  deadline = Infinity;
+  get late() {
+    return Date.now() > this.deadline;
+  }
   uploadsDir: string;
 
   /** Every helper process the hub starts; stop() walks it. */
@@ -186,6 +197,7 @@ export class Hub {
     this.brain = new Brain(this.session, this.host);
     this.transcriber = new Transcriber(this.session, this.helpers);
     this.audio = new AudioPipeline(this.session, this.transcriber);
+    this.audio.track = (work) => this.track("speech being transcribed", work);
     this.canvas = new Canvas(this.session, this.helpers);
     this.fonts = new FontService(() => this.session.agents(), (id) => this.session.person(id)?.name);
     this.session.fonts = () => this.fonts.state();
@@ -235,6 +247,43 @@ export class Hub {
     this.brain.attachments = this.attachments;
     // A new session of a project starts from what the last one settled (SPEC 12.7).
     if (!opts.dataDir && config.project) seedFromProject(config.home, config.project.slug, config.project.sessionId, this.session);
+    // The project's wiki (SPEC 12.8): the fact list lives on as pages. The first session of a project folds its facts in.
+    const wikiDir = opts.wikiDir ?? (!opts.dataDir && config.project ? join(projectsDir(config.home), config.project.slug) : join(dir, "project-wiki"));
+    const projectWiki = !opts.dataDir && config.project && !opts.wikiDir;
+    try {
+      this.wiki = new WikiService(this.session, wikiDir, this.session.sessionId, !opts.dataDir ? (config.project?.slug ?? "") : "", projectWiki ? projectsDir(config.home) : undefined);
+    } catch (e) {
+      // A project folder that is a link: the wiki lives in this session's own folder instead, and nothing is written through the link.
+      console.error("wiki:", e instanceof Error ? e.message : e);
+      this.wiki = new WikiService(this.session, join(dir, "project-wiki"), this.session.sessionId, "");
+    }
+    this.wiki.attachmentBytes = (id) => {
+      const rec = this.attachments.record(id);
+      const bytes = rec ? this.attachments.bytes(id) : null;
+      return rec && bytes ? { name: rec.name, type: rec.kind, bytes } : null;
+    };
+    this.session.wikiAccept = (c, pages, by) => this.wiki.accept(c, pages, by);
+    this.session.wikiClosed = (c) => this.wiki.closed(c);
+    this.session.wikiDismiss = (c, by) => this.wiki.dismissing(c, by);
+    this.session.onFactSaved = (f) => void this.wiki.factSaved(f);
+    try {
+      // Raises the project's open proposals on this session's board, and closes any whose accept finished.
+      this.wiki.restore();
+    } catch (e) {
+      console.error("wiki restore:", e instanceof Error ? e.message : e);
+    }
+    this.brain.curateInDigest = false;
+    try {
+      this.wiki.migrate(!opts.dataDir && config.project ? readProjectContext(config.home, config.project.slug) : null);
+    } catch (e) {
+      console.error("wiki migrate:", e instanceof Error ? e.message : e);
+    }
+    try {
+      // Pages changed by hand in the vault while the hub was off are filed as people's edits.
+      this.wiki.syncVault();
+    } catch (e) {
+      console.error("wiki sync:", e instanceof Error ? e.message : e);
+    }
     this.uploadsDir = join(this.canvas.rendersDir, "uploads");
     mkdirSync(this.uploadsDir, { recursive: true });
 
@@ -246,7 +295,14 @@ export class Hub {
       return { ...voiceprintStatus(), enrolled: this.audio.voiceprints.enrolled, lines: st.lines, byVoice: st.voice, neverUsed: heard > 0 && st.lines >= 12 && st.voice === 0 };
     };
     this.canvas.onRendered = (ids) => this.brain.artifactsLanded(ids.map((id) => this.session.store.get("artifacts", id)!).filter(Boolean));
-    this.session.onUpdate = (agent, kind, text, ev) => this.brain.agentUpdated(agent, kind, text, ev);
+    this.session.onUpdate = (agent, kind, text, ev) => {
+      this.brain.agentUpdated(agent, kind, text, ev);
+      try {
+        this.wiki.agentUpdate();
+      } catch (e) {
+        console.error("wiki:", e instanceof Error ? e.message : e);
+      }
+    };
     this.session.onBrainMessage = (ev) => this.brain.agentMessage(ev);
     this.session.onClaim = (agentId, title) => void this.canvas.focusAgentPage(agentId, title).catch(() => {});
     this.brain.relabel = (eventId, name) => {
@@ -271,17 +327,16 @@ export class Hub {
     void this.fonts.scan().catch(() => {});
     this.autosave.start();
     this.keeper.start();
-    this.intervals.push(setInterval(() => this.devproxy.refresh(), 30_000), setInterval(() => this.session.tick(), 60_000), setInterval(() => void this.flushComments(), 20_000));
-    this.intervals[1]?.unref?.();
-    this.intervals[2]?.unref?.();
+    this.wiki.start();
+    this.session.timers.every(() => this.devproxy.refresh(), 30_000);
+    this.session.timers.every(() => this.session.tick(), 60_000);
+    this.session.timers.every(() => void this.flushComments(), 20_000);
     // Connected clients learn where an HTTPS page reaches the dev servers when remote access turns on, off, or changes.
     let devPublic = String(this.session.devPublicBase(0));
-    this.intervals.push(
-      setInterval(() => {
-        const now = String(this.session.devPublicBase(0));
-        if (now !== devPublic) (devPublic = now), bus.changed("devservers");
-      }, 3000),
-    );
+    this.session.timers.every(() => {
+      const now = String(this.session.devPublicBase(0));
+      if (now !== devPublic) (devPublic = now), bus.changed("devservers");
+    }, 3000);
     await Promise.all(tasks);
     // Without an engine the room is deaf and nothing says so; say so on the first screen.
     if (this.opts.whisper !== false) {
@@ -291,18 +346,34 @@ export class Hub {
   }
 
   /** How long each step of `shutdown` may take. The Mac app waits longer than their sum (host.rs `SHUTDOWN_WAIT`) before killing. */
-  static SHUTDOWN_MS = { snapshot: 8000, thumbnail: 4000, network: 12000, work: 10000 };
+  /** How long shutdown waits for accepted work before it gives up on it (the `work` step). */
+  static get SHUTDOWN_WAIT_MS() {
+    return Hub.SHUTDOWN_MS.work;
+  }
+  static set SHUTDOWN_WAIT_MS(ms: number) {
+    Hub.SHUTDOWN_MS = { ...Hub.SHUTDOWN_MS, work: ms };
+  }
+  static SHUTDOWN_MS = { snapshot: 8000, thumbnail: 4000, wiki: 20000, network: 12000, work: 10000 };
 
   /**
    * Stops, saving a final snapshot first when there is a canvas to save. Resolves with whether every step
    * finished and every helper's exit was seen: false otherwise, which the hub's exit code reports (index.ts).
+   *
+   * One order, one deadline: (1) intake closes (a write is refused, a timer of the room stops) and the router is asked to close its
+   * port at once; (2) work that was accepted finishes: requests, brain passes, speech (waiting speech is transcribed now, not on its
+   * timer); a step that overruns the deadline is given up on, and what it adds afterwards is refused (room-context.ts);
+   * (3) the final snapshot and thumbnail; (4) the conversation is sealed, then its last stretch goes into the wiki; (5) the router
+   * is confirmed closed and every helper seen to exit; (6) the vault and the store take no more writes.
    */
   async shutdown(): Promise<boolean> {
     const step = (work: Promise<unknown>, ms: number) => Promise.race([work.then(() => true, () => false), Bun.sleep(ms).then(() => false)]);
-    // Intake stops first; then accepted work still running (requests to the brain, a prompt window, a document card, speech being transcribed) finishes, or is named as unfinished, before anything is saved.
     this.closing = true;
     // The router is asked to close the port from the start, not after the drain: its replies take seconds, and it must finish before exit.
     const netStop = this.net.close();
+    this.session.timers.stop(); // no timer of the room fires from here on: none can write past the seal
+    this.autosave.stop();
+    this.keeper.stop();
+    this.awake.stop();
     // Open waits end now, so none wakes and writes after the final save.
     this.mcp.endWaits();
     // Words held for a recording nobody stopped go to the room now, so the drain and the save include them.
@@ -310,16 +381,36 @@ export class Hub {
     // A recording still open ends now: its screen lock (taken for it) is given back, not left for a restart to find.
     for (const r of [...this.recs.values()]) void this.endRecording(r, "disconnect");
     this.brain.quiesce();
+    // Speech waiting for its timer is finished and transcribed now.
+    void this.track("speech being transcribed", this.audio.flush()).catch((e) => console.error("audio:", e));
+    this.deadline = Date.now() + Hub.SHUTDOWN_MS.work;
     const unfinished = await this.drain(Hub.SHUTDOWN_MS.work);
     if (unfinished.length) console.error(`Shutdown: still working on ${unfinished.join(", ")}; the final save may miss it.`);
+    this.audio.closed = true; // an upload still sending now is refused, not taken in behind the flush
     const docs = !unfinished.length && !this.workLost;
+    this.canvas.flushActivity(); // canvas work still batched for a timer is recorded while the conversation is open
+    this.brain.stop();
+    this.transcriber.stop();
     // A snapshot whose canvas copy failed is not a final save.
     const saved = await step(this.autosave.save("end of session", { final: true }).then((snap) => (snap?.canvasFailed ? Promise.reject(new Error("the canvas copy failed")) : snap)), Hub.SHUTDOWN_MS.snapshot);
     const kept = await step(this.keeper.save(), Hub.SHUTDOWN_MS.thumbnail);
+    // The conversation is sealed (a late event is refused, not missed), then its last stretch goes into the wiki's sources, on its own (it never
+    // waits behind a slow ingest); it is read in if the model answers in time, or at the next start.
+    this.canvas.flushActivity(); // a canvas call that finished after the first flush, still before the conversation is sealed
+    this.store.seal("events");
+    await step(
+      Promise.resolve()
+        .then(() => this.wiki.captureFinal())
+        .catch((e) => console.error("wiki:", e instanceof Error ? e.message : e))
+        .then(() => this.wiki.flush()),
+      Hub.SHUTDOWN_MS.wiki,
+    );
     const closed = await step(netStop.then((gone) => (gone ? undefined : Promise.reject(new Error("the router's port forward wasn't confirmed closed")))), Hub.SHUTDOWN_MS.network);
     // Bounded by the helpers' own TERM-then-KILL waits, so no timeout race that could report them gone unseen.
     const reaped = await this.stop();
     if (!reaped) console.warn("a helper process was still running at shutdown");
+    this.wiki.close(); // the vault takes no more writes either
+    this.store.seal("all");
     return docs && saved && kept && closed && reaped;
   }
 
@@ -333,6 +424,7 @@ export class Hub {
     this.awake.stop();
     this.autosave.stop();
     this.keeper.stop();
+    this.wiki.stop();
     this.brain.stop();
     this.canvas.halt();
     this.devproxy.stop();
@@ -409,10 +501,11 @@ export class Hub {
   }
 
   /** Registers work that is already a promise: counted until it settles. Failures stay the caller's to report. */
-  track<T>(what: string, work: Promise<T>): Promise<T> {
-    const release = this.admit(what);
-    work.then(release, release);
-    return work;
+  track<T>(what: string | Promise<T>, work?: Promise<T>): Promise<T> {
+    const p = typeof what === "string" ? work! : what; // a promise alone is counted under a general name
+    const release = this.admit(typeof what === "string" ? what : "accepted work");
+    p.then(release, release);
+    return p;
   }
 
   /** What is still being worked on: tracked work, and room speech still being transcribed. */
@@ -436,7 +529,7 @@ export class Hub {
 
   /** Accepted work that couldn't be finished (a document card, a kept screenshot): the final save is reported incomplete. */
   private workLost = false;
-  /** Set when shutdown begins: no new message is taken in, so nothing arrives after the last document card is waited for. */
+  /** Set when shutdown begins: no new message is taken in, so nothing arrives after the last document card or the wiki's final capture. */
   closing = false;
 
   /** Devices recording a prompt for the brain right now, with when they started. */
@@ -452,8 +545,7 @@ export class Hub {
     this.releasePrompt(deviceId);
     const w: PromptWindow = { t0, max };
     // The window ends on its own (SPEC 11.3) if Stop never arrives; nothing said in it is lost.
-    w.timer = setTimeout(() => this.releasePrompt(deviceId, w), max + 1000);
-    w.timer.unref?.();
+    w.timer = this.session.timers.after(() => this.releasePrompt(deviceId, w), max + 1000) ?? undefined;
     this.promptMode.set(deviceId, w);
     return w;
   }
@@ -467,7 +559,7 @@ export class Hub {
   private releasePrompt(deviceId: string, only?: PromptWindow) {
     const w = this.promptMode.get(deviceId);
     if (!w || (only && w !== only) || w.t1 !== undefined) return;
-    clearTimeout(w.timer);
+    this.session.timers.clear(w.timer);
     this.promptMode.delete(deviceId);
     for (const u of this.session.store.all("utterances")) {
       if (u.eventId || u.t0 < w.t0 || u.t0 > w.t0 + w.max || (w.t1 !== undefined && u.t0 > w.t1 + 300) || !this.fromRecorder(u, deviceId)) continue;
@@ -1146,7 +1238,7 @@ export class Hub {
     const ask = showRequestSpeech(r);
     void speak(this.session, ask, { source: "voice", kind: "request" });
     // Once more after a minute if the owner hasn't answered.
-    setTimeout(() => this.session.showRequests().find((x) => x.id === r.id)?.status === "pending" && void speak(this.session, `Still waiting, ${first(r.ownerName)}: ${ask}`, { source: "voice", kind: "request" }), 60_000).unref?.();
+    this.session.timers.after(() => this.session.showRequests().find((x) => x.id === r.id)?.status === "pending" && void speak(this.session, `Still waiting, ${first(r.ownerName)}: ${ask}`, { source: "voice", kind: "request" }), 60_000);
   }
 
   // ---------- host build requests (approved by people, by voice or a button) ----------
@@ -1178,7 +1270,7 @@ export class Hub {
         : `${r.agentName} wants to build ${what} on the host. Approve or deny?`;
       void speak(s, ask, { source: "voice", kind: "request" });
       // Once more after a minute if nobody answered (people may have been mid-conversation).
-      setTimeout(() => r.status === "pending" && void speak(s, `Still waiting: ${ask}`, { source: "voice", kind: "request" }), 60_000).unref?.();
+      this.session.timers.after(() => r.status === "pending" && void speak(s, `Still waiting: ${ask}`, { source: "voice", kind: "request" }), 60_000);
     } else {
       const outcome = r.status === "approved" ? `approved by ${r.decidedBy}; it's building on the host now and opens when it's done` : r.status === "denied" ? `denied by ${r.decidedBy}` : "not answered in 10 minutes, so it expired";
       if (r.status !== "approved") bus.send({ type: "toast", tone: "info", text: r.status === "denied" ? `Denied ${r.agentName}'s build` : `${r.agentName}'s build request expired`, detail: r.decidedBy ? `By ${r.decidedBy}` : undefined });

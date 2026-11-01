@@ -150,6 +150,8 @@ export class AudioPipeline {
   stats = { lines: 0, voice: 0, someone: 0 };
   /** Called with each new or updated room line. */
   onLine: ((u: Utterance, isNew: boolean) => void) | null = null;
+  /** Counts a transcription as work in flight (Hub.track), so shutdown waits for its line. */
+  track: <T>(work: Promise<T>) => Promise<T> = (work) => work;
 
   constructor(
     private session: Session,
@@ -189,8 +191,12 @@ export class AudioPipeline {
     return this.lag.get(deviceId)?.ms ?? 0;
   }
 
+  /** Set when the room has given up waiting for uploads (shutdown): nothing more is taken in, and the request that brought it is refused. */
+  closed = false;
+
   /** `epoch`: the reset epoch the device had when it captured the segment (Store.voiceEpoch); none for audio the host captured now. */
   async ingest(input: { deviceId: string; t0: number; t1: number; wav: Uint8Array; epoch?: number }): Promise<Segment> {
+    if (this.closed) throw Object.assign(new Error("The room is closed."), { code: "ESEALED" });
     const raw = decodeWav(input.wav);
     const pcm = resample(raw, 16000);
     const measured = speechLevelDb(pcm);
@@ -247,10 +253,10 @@ export class AudioPipeline {
   private schedule(g: Group) {
     if (g.timer) clearTimeout(g.timer);
     const wait = Math.max(0, g.t1 + this.settleMs(g.location) - Date.now());
-    g.timer = setTimeout(() => this.finalize(g).catch((e) => console.error("audio:", e)), Math.max(wait, 150));
+    g.timer = setTimeout(() => this.track(this.finalize(g)).catch((e) => console.error("audio:", e)), Math.max(wait, 150));
   }
 
-  /** Waits for every open group and every queued job to finish (tests). */
+  /** Finishes every open group now and waits for it (tests, and shutdown). */
   async flush() {
     const groups = [...this.open];
     // Stop every timer first: one that fires while an earlier group is transcribing

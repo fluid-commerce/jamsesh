@@ -628,8 +628,13 @@ export class HostControl {
     return lines.join("\n");
   }
 
+  /** A note in the room's feed. A background job can finish after the conversation is sealed: then there is no feed to write to, and that is not an error. */
   private log(text: string) {
-    this.session.store.addEvent({ kind: "system", authorType: "brain", authorName: "Host", text, relevance: "work" });
+    try {
+      this.session.store.addEvent({ kind: "system", authorType: "brain", authorName: "Host", text, relevance: "work" });
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException)?.code !== "ESEALED") throw e;
+    }
   }
 
   async act(a: HostAction): Promise<string> {
@@ -866,7 +871,8 @@ export class HostControl {
             return assertNever(r);
         }
       })
-      .catch((e) => this.log(`Shell command failed: ${e instanceof Error ? e.message : e}`));
+      .catch((e) => this.log(`Shell command failed: ${e instanceof Error ? e.message : e}`))
+      .catch((e) => console.error("[host] shell job:", e instanceof Error ? e.message : e)); // nothing here may end as an unhandled rejection
     return `Running on the host: ${command}`;
   }
 
@@ -992,7 +998,10 @@ export class HostControl {
       } finally {
         release();
       }
-    })();
+    })().catch((e) => {
+      // A background job never ends as an unhandled rejection, whatever its own error handling hits.
+      if ((e as NodeJS.ErrnoException)?.code !== "ESEALED") console.error("[host] preview build:", e instanceof Error ? e.message : e);
+    });
     return `Building ${label} on the host. It opens when the build finishes, and the room sees a note either way.`;
   }
 
