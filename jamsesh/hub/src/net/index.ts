@@ -172,7 +172,7 @@ export class Network {
   tlsOptions(): { cert: string; key: string; serverName: string }[] | null {
     const d = this.domain();
     // Off means off: no listener, whatever certificates are kept on disk.
-    if (!d || !this.cfg?.enabled || this.shut) return null;
+    if (!d || !this.cfg?.enabled || this.shut || this.offRequested) return null;
     const out: { cert: string; key: string; serverName: string }[] = [];
     // Only a certificate for this name, issued the way the setting says: while a replacement is pending, nothing is served rather than the wrong name.
     const fits = (b: ReturnType<CertStore["load"]>, name: string) => (b && b.names.includes(name) && b.staging === this.cfg!.staging ? b : null);
@@ -229,6 +229,8 @@ export class Network {
   private shut = false;
   /** Counts setup/disable requests: one that finds a newer one made while it waited is stale and changes nothing. */
   private cfgGen = 0;
+  /** Set the moment Off is asked for, before it waits its turn: the HTTPS listener closes at once, not after an order or a router call ahead of it. */
+  private offRequested = false;
   /** Setup, turn-off, retry and close run one after another; a request made stale while it waited is refused before it touches the router. */
   private lane: Promise<unknown> = Promise.resolve();
   private inLane<T>(fn: () => Promise<T>): Promise<T> {
@@ -340,6 +342,7 @@ export class Network {
           await this.start().catch(() => {});
           return json({ error: "Another change was made while this one was being checked. Try again." }, 409);
         }
+        this.offRequested = false; // a setup that was not overtaken by a turn-off turns access on again
         try {
           this.saveConfig({ domain: d.fqdn, token, externalPort, internalPort, enabled: true, staging: body.staging ?? this.cfg?.staging ?? false });
         } catch {
@@ -375,6 +378,8 @@ export class Network {
     }
     if (p === "disable") {
       this.cfgGen++;
+      this.offRequested = true;
+      this.certChanged.forEach((cb) => cb()); // closed now; the rest of turning off follows in order
       return this.inLane(async () => {
       // Off is saved either way, but a forward the router didn't confirm closing is said so, and Retry stays available to try again.
       const gone = await this.stop();

@@ -333,3 +333,25 @@ test("a changed managed Parakeet model that can't be removed is a failed status,
     rmSync(own, { recursive: true, force: true });
   }
 });
+
+test("turning Parakeet off while its model is being checked moves nothing", async () => {
+  const own = join(config.home, "models", PARAKEET.name);
+  const was = process.env.JAMSESH_PARAKEET_DIR;
+  try {
+    mkdirSync(own, { recursive: true });
+    for (const f of PARAKEET.files) writeFileSync(join(own, f), `contents of ${f}`);
+    await writeManifest(own);
+    writeFileSync(join(own, PARAKEET.files[0]), "swapped");
+    delete process.env.JAMSESH_PARAKEET_DIR;
+    const p = new Parakeet();
+    const started = p.start(false);
+    p.stop(); // while the check of the model is still running
+    expect(await started).toBeNull();
+    expect(existsSync(own)).toBe(true); // not moved aside
+    expect(p.status().state).toBe("off");
+  } finally {
+    if (was === undefined) delete process.env.JAMSESH_PARAKEET_DIR;
+    else process.env.JAMSESH_PARAKEET_DIR = was;
+    rmSync(own, { recursive: true, force: true });
+  }
+});

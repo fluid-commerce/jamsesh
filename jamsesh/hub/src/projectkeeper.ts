@@ -29,7 +29,16 @@ export class ProjectKeeper {
     this.timer = null;
   }
 
-  async save() {
+  private chain: Promise<unknown> = Promise.resolve();
+
+  /** Saves run one after another: an earlier save still waiting on its thumbnail can't write over a later one, the final save included. */
+  save(): Promise<void> {
+    const run = this.chain.then(() => this.saveOnce());
+    this.chain = run.catch(() => {});
+    return run;
+  }
+
+  private async saveOnce() {
     const p = this.project;
     if (!p) return;
     const s = this.hub.session;

@@ -89,6 +89,8 @@ export class Parakeet {
   private detail = "Off. Turn on the faster engine in Settings.";
   private progress: number | null = null;
   private stopped = false;
+  /** Moves on every start and every stop: a start that finds it changed after a wait was stopped (or replaced) and changes no files. */
+  private gen = 0;
   /** Called when a running engine's process ends on its own. */
   onExit: (() => void) | null = null;
 
@@ -109,12 +111,15 @@ export class Parakeet {
   async start(download: boolean): Promise<string | null> {
     if (process.env.JAMSESH_PARAKEET === "0") return this.set("off", "Turned off on this host (JAMSESH_PARAKEET=0)."), null;
     this.stopped = false;
+    const my = ++this.gen;
+    const gone = () => this.gen !== my;
     // Never rejects: every failure, finding and checking the model included, is a failed status (callers fire and forget).
     try {
       let dir = findModel();
       const own = join(config.home, "models", PARAKEET.name);
       // Whatever spelling found it (models/./name, a symlink), the managed model is checked against its manifest.
       if (dir && samePath(dir, own) && !(await installedIntact(own).catch(() => false))) {
+        if (gone()) throw new Error("stopped"); // turned off while it was being checked: nothing is moved
         // A file changed after it was verified, or the folder was never JamSesh's: it isn't loaded, and it is moved aside (never deleted: it may be someone's own model); a fresh copy replaces it where downloads are allowed.
         try {
           setAside(own);
@@ -124,35 +129,38 @@ export class Parakeet {
         dir = findModel();
       }
       if (!dir && !download) return this.set("missing", `The speech model isn't on this host (${Math.round(PARAKEET.bytes / 1e6)} MB download).`), null;
-      dir ??= await this.download();
-      if (this.stopped) return null;
+      dir ??= await this.download(gone);
+      if (gone()) return null;
       this.set("starting", "Loading the speech model.");
       const url = await this.spawn(dir);
-      if (this.stopped) return this.stop(), null;
+      if (gone()) return this.stop(), null;
       this.set("ready", `Running on this host (${PARAKEET.label}).`);
       return url;
     } catch (e) {
-      if (this.stopped) return this.set("off", "Off. Turn on the faster engine in Settings."), null;
+      if (gone()) return this.stopped ? (this.set("off", "Off. Turn on the faster engine in Settings."), null) : null;
       this.set("failed", (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 240));
       return null;
     }
   }
 
-  private async download(): Promise<string> {
+  private async download(gone: () => boolean = () => this.stopped): Promise<string> {
     const models = join(config.home, "models");
     mkdirSync(models, { recursive: true });
     const work = mkdtempSync(join(models, ".parakeet-"));
     try {
       this.set("downloading", `Downloading the speech model (${Math.round(PARAKEET.bytes / 1e6)} MB, once).`, 0);
       const archive = join(work, "model.tar.bz2");
-      await downloadVerified(PARAKEET, archive, (pct) => (this.progress = pct), () => this.stopped);
+      await downloadVerified(PARAKEET, archive, (pct) => (this.progress = pct), gone);
+      if (gone()) throw new Error("stopped");
       const tar = Bun.spawnSync(["tar", "-xjf", archive, "-C", work], { stdout: "ignore", stderr: "pipe" });
       if (tar.exitCode !== 0) throw new Error(`Couldn't unpack the speech model: ${tar.stderr.toString().trim().slice(0, 120)}`);
       const unpacked = join(work, `sherpa-onnx-nemo-${PARAKEET.name}`);
       if (!has(unpacked)) throw new Error("The speech model archive is missing files.");
       const dest = join(models, PARAKEET.name);
+      if (gone()) throw new Error("stopped"); // turned off during the download or unpack: nothing is installed
       if (existsSync(dest)) setAside(dest);
       await writeManifest(unpacked);
+      if (gone()) throw new Error("stopped");
       renameSync(unpacked, dest);
       return dest;
     } finally {
@@ -203,6 +211,7 @@ export class Parakeet {
   /** Stops the engine, or a download in progress; start() can run again afterwards. */
   stop() {
     this.stopped = true;
+    this.gen++;
     if (this.proc) void stopHelper(this.proc);
     this.proc = null;
     if (this.state !== "off") this.set("off", "Off. Turn on the faster engine in Settings.");

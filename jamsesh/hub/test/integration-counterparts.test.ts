@@ -625,7 +625,7 @@ test("a setup with bad ports changes nothing at DuckDNS, and a turn-off whose fi
   const off = await post("disable", {});
   expect(off?.status).toBe(500);
   expect(((await off?.json()) as any).error).toContain("couldn't be saved");
-  expect(closed).toBe(1);
+  expect(closed).toBeGreaterThanOrEqual(1);
   expect(n.status().enabled).toBe(false);
 });
 
@@ -862,4 +862,65 @@ test("a delete started while a NAT-PMP renewal is waiting on a moved-port reply:
   } finally {
     sock.close();
   }
+});
+
+test("Off closes the HTTPS listener the moment it is asked for, not after the order or router call ahead of it", async () => {
+  const { Network } = await import("../src/net");
+  const n = new Network(join(dir, "net-off-now"), (async () => new Response("OK\n1.2.3.4\n\nUPDATED")) as any);
+  (n as any).ensureCert = async () => {};
+  (n as any).mapper = { map: async () => ({ method: "upnp" }), unmap: async () => true };
+  (n as any).cfg = { domain: "old.duckdns.org", token: "00000000-0000-0000-0000-000000000000", externalPort: 443, internalPort: 4443, enabled: true, staging: false };
+  let closed = 0;
+  (n as any).certChanged.push(() => closed++);
+  let release!: () => void;
+  (n as any).issuing = new Promise<void>((r) => (release = r)); // an order for the old name that takes minutes
+  const post = (p: string, body: object) => n.routes(new Request(`http://x/api/net/${p}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }), new URL(`http://x/api/net/${p}`));
+  const setup = post("config", { domain: "new", token: "11111111-1111-1111-1111-111111111111" });
+  await Bun.sleep(50);
+  const off = post("disable", {});
+  await Bun.sleep(20);
+  expect(closed).toBeGreaterThan(0); // told to close while the order is still running
+  expect(n.tlsOptions()).toBeNull();
+  release();
+  await setup;
+  await off;
+  expect((n as any).cfg.enabled).toBe(false);
+});
+
+test("a workstream brief that failed is tried again on the backoff, with no new room activity", async () => {
+  process.env.JAMSESH_SILENT = "1";
+  const { Hub } = await import("../src/hub");
+  const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "brain-briefs"), teamDir: join(dir, "team-br") });
+  try {
+    clearInterval((hub.brain as any).digestTimer);
+    const b: any = hub.brain;
+    let n = 0;
+    b.workstreamBriefs = async () => {
+      if (++n === 1) throw new Error("model down");
+    };
+    await b.briefsRun();
+    expect(b.briefsPending).toBe(true);
+    expect(b.digestRetryAt).toBeGreaterThan(Date.now());
+    await b.briefsRun();
+    expect(b.briefsPending).toBe(false);
+    expect(n).toBe(2);
+  } finally {
+    hub.devproxy.stop();
+    hub.stop();
+  }
+});
+
+test("project saves run one after another, so an earlier slow thumbnail can't land over the final one", async () => {
+  const { ProjectKeeper } = await import("../src/projectkeeper");
+  const k: any = new ProjectKeeper({} as any, dir, null);
+  const order: string[] = [];
+  let n = 0;
+  k.saveOnce = async () => {
+    const me = ++n;
+    order.push(`start${me}`);
+    await Bun.sleep(me === 1 ? 60 : 1);
+    order.push(`end${me}`);
+  };
+  await Promise.all([k.save(), k.save()]);
+  expect(order).toEqual(["start1", "end1", "start2", "end2"]);
 });

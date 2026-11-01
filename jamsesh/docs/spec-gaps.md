@@ -384,12 +384,10 @@ The mic now defaults to on unless the person muted it (`web/src/client/ClientVie
 - **Close it:** add barge-in to remote clients, a "Hear <name>" toggle, and let the router set a
   `quiet` flag through `remember_feedback`.
 
-### 38. Curation is lost when a pass fails [A16d]
+### 38. Resolved in the release candidate
 
-- **Spec:** a batch that fails to curate is retried (SPEC 7.3).
-- **Code:** the digest is written before curation; if curation or the workstream briefs throw, that
-  batch is never curated (`hub/src/brain/brain.ts:704-801`).
-- **Close it:** advance `through_event` only after curation succeeds.
+The digest cursor moves only after curation succeeds (a failed pass is retried with a growing wait), and a failed
+workstream brief is retried on the same backoff even in a quiet room (`hub/src/brain/brain.ts`, `briefsRun`).
 
 ### 39. Smaller security and hygiene items [security]
 

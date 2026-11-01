@@ -1504,7 +1504,14 @@ export class Brain {
     if (this.stopped || !s.settings().brainEnabled) return;
     if (!force && (Date.now() - this.lastDigestAt < DIGEST_EVERY_MS || Date.now() < this.digestRetryAt)) return;
     const prev = s.store.digest("session");
-    if (!force && prev && s.store.lastEventId() - prev.throughEvent < 6) return;
+    if (!force && prev && s.store.lastEventId() - prev.throughEvent < 6) {
+      // A brief that failed last time is tried again on the backoff even in a quiet room.
+      if (this.briefsPending && model(s, "digest")) {
+        this.lastDigestAt = Date.now();
+        await this.briefsRun();
+      }
+      return;
+    }
     const m = model(s, "digest");
     if (!m) return;
     this.lastDigestAt = Date.now();
@@ -1538,11 +1545,23 @@ export class Brain {
       this.digestRetryAt = 0;
       s.store.setDigest("brief-parts", JSON.stringify(output), lastId);
       s.store.setDigest("session", buildBrief(s).full, lastId);
-      await this.workstreamBriefs();
+      await this.briefsRun();
       // More waiting behind this page: read the next one soon rather than after the usual interval.
       if (page.length === DIGEST_PAGE) this.lastDigestAt = 0;
     } catch (e) {
       this.digestFailed(describeError(e));
+    }
+  }
+
+  /** True while the workstream briefs still need writing: a failed attempt is retried on the digest backoff without new room activity. */
+  private briefsPending = false;
+  private async briefsRun() {
+    this.briefsPending = true;
+    try {
+      await this.workstreamBriefs();
+      this.briefsPending = false;
+    } catch (e) {
+      this.digestFailed(`workstream briefs: ${describeError(e)}`);
     }
   }
 
