@@ -40,6 +40,8 @@ export function uuid(): string {
 
 export interface Table<T> {
   add(v: T): Promise<number>;
+  /** Rewrites the row at `seq` in one step (never a delete followed by an add). */
+  replace?(seq: number, v: T): Promise<void>;
   all(): Promise<(T & { seq: number })[]>;
   delete(seq: number): Promise<void>;
   clear(): Promise<void>;
@@ -55,7 +57,8 @@ const STORES = ["outbox", "audio"] as const;
  * every audio segment, and every queued call that isn't stamped for a different host. Rows are copied first and
  * removed from the old database only after all of them are in the new one. Nothing is created if there was no old database.
  */
-async function migrateLegacy(target: IDBDatabase): Promise<void> {
+async function migrateLegacy(target: IDBDatabase, targetName: string): Promise<void> {
+  if (targetName === LEGACY_DB) return; // never into itself
   const old = await new Promise<IDBDatabase | null>((resolve) => {
     try {
       const req = indexedDB.open(LEGACY_DB, 1);
@@ -111,14 +114,15 @@ function openDb(): Promise<IDBDatabase | null> {
   dbPromise = new Promise((resolve) => {
     try {
       if (typeof indexedDB === "undefined") return resolve(null);
-      const req = indexedDB.open(DB_NAME(), 1);
+      const name = DB_NAME(); // the name this open is for: what migration compares against, whatever the host becomes meanwhile
+      const req = indexedDB.open(name, 1);
       req.onupgradeneeded = () => {
         for (const s of STORES) if (!req.result.objectStoreNames.contains(s)) req.result.createObjectStore(s, { keyPath: "seq", autoIncrement: true });
       };
       req.onsuccess = () => {
         const db = req.result;
         // Work saved before the host was known sits in the unscoped database: it joins this host's, once.
-        if (DB_NAME() !== LEGACY_DB) void migrateLegacy(db).then(() => resolve(db), () => resolve(db));
+        if (name !== LEGACY_DB) void migrateLegacy(db, name).then(() => resolve(db), () => resolve(db));
         else resolve(db);
       };
       req.onerror = () => resolve(null);
@@ -165,6 +169,19 @@ export function idbTable<T extends object>(store: (typeof STORES)[number]): Tabl
       const seq = ++memSeq + 1e9; // keep memory keys apart from persisted ones
       mem.set(seq, { ...v, seq });
       return seq;
+    },
+    async replace(seq, v) {
+      const held = mem.get(seq);
+      if (held) return void mem.set(seq, { ...v, seq });
+      const db = await openDb();
+      if (!db) throw new Error("no storage");
+      const tx = db.transaction(store, "readwrite");
+      tx.objectStore(store).put({ ...v, seq });
+      await new Promise<void>((res, rej) => {
+        tx.oncomplete = () => res();
+        tx.onabort = () => rej(tx.error ?? new Error("aborted"));
+        tx.onerror = () => rej(tx.error ?? new Error("failed"));
+      });
     },
     async all() {
       const db = await openDb();
@@ -313,9 +330,9 @@ export class Outbox {
   }
 
   /** Queue a call. Resolves once it is durable. */
-  async enqueue(method: string, path: string, body?: unknown, idem: string = uuid()): Promise<OutboxEntry> {
+  async enqueue(method: string, path: string, body?: unknown, idem: string = uuid(), stamp?: { hostId: string; roomId: string }): Promise<OutboxEntry> {
     await this.load();
-    const e: OutboxEntry = { idem, method, path, body, createdAt: this.now(), serverFails: 0, hostId: this.d.hostId?.() ?? "", roomId: currentRoom() };
+    const e: OutboxEntry = { idem, method, path, body, createdAt: this.now(), serverFails: 0, hostId: stamp?.hostId ?? this.d.hostId?.() ?? "", roomId: stamp?.roomId ?? currentRoom() };
     e.seq = await this.d.table.add(e);
     this.entries.push(e);
     this.entries.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
@@ -329,9 +346,9 @@ export class Outbox {
    * Saves a call that is about to be sent directly, without queueing it: if the window closes while it is out, the
    * next load finds it and sends it again with the same key. `release` removes it once the hub's answer is known.
    */
-  async hold(method: string, path: string, body: unknown, idem: string): Promise<number | undefined> {
+  async hold(method: string, path: string, body: unknown, idem: string, stamp?: { hostId: string; roomId: string }): Promise<number | undefined> {
     await this.load();
-    const e: OutboxEntry = { idem, method, path, body, createdAt: this.now(), serverFails: 0, hostId: this.d.hostId?.() ?? "", roomId: currentRoom() };
+    const e: OutboxEntry = { idem, method, path, body, createdAt: this.now(), serverFails: 0, hostId: stamp?.hostId ?? this.d.hostId?.() ?? "", roomId: stamp?.roomId ?? currentRoom() };
     return this.d.table.add(e);
   }
 
@@ -451,7 +468,8 @@ export async function sendEntry(e: OutboxEntry): Promise<SendResult> {
         "x-jam-idem": e.idem,
         "x-jam-queued-at": String(e.createdAt),
         ...(e.hostId ? { "x-jam-host": e.hostId } : {}),
-        ...(e.roomId ? { "x-jam-room": e.roomId } : {}),
+        // Work saved before it knew its session can't be placed in this one: "unknown" never matches, so the hub refuses it and it is dropped.
+        "x-jam-room": e.roomId || "unknown",
       },
       body: e.body === undefined ? undefined : JSON.stringify(e.body),
     });

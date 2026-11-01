@@ -137,8 +137,7 @@ export class AudioBuffer {
     const direct = !this.rows.length && !this.draining && this.canSend();
     // Saved before it is sent: if the window closes while the upload is out, the segment is still here next time.
     seg.seq = await this.table.add(seg);
-    if (direct) {
-      await this.stamp(seg);
+    if (direct && (await this.stamp(seg).then(() => true, () => false))) {
       const r = await this.post(seg);
       if (r === "ok" || r === "drop") {
         await this.table.delete(seg.seq);
@@ -161,8 +160,21 @@ export class AudioBuffer {
     s.t1 += shift;
     s.unsynced = false;
     if (s.seq != null) {
-      await this.table.delete(s.seq);
-      s.seq = await this.table.add(s);
+      // One write: the saved copy is replaced, never deleted first. A failed write leaves the original (and the segment still unsynced) as it was.
+      const before = { t0: s.t0 - shift, t1: s.t1 - shift };
+      try {
+        if (this.table.replace) await this.table.replace(s.seq, s);
+        else {
+          const seq = await this.table.add(s);
+          await this.table.delete(s.seq);
+          s.seq = seq;
+        }
+      } catch (e) {
+        s.t0 = before.t0;
+        s.t1 = before.t1;
+        s.unsynced = true;
+        throw e;
+      }
     }
   }
 
@@ -190,7 +202,10 @@ export class AudioBuffer {
     try {
       while (this.rows.length && this.canSend()) {
         const s = this.rows[0];
-        await this.stamp(s);
+        if (!(await this.stamp(s).then(() => true, () => false))) {
+          this.schedule(); // the adjusted copy couldn't be saved: nothing is sent, the saved original stays, and it is tried again
+          return;
+        }
         const r = await this.post(s);
         if (r === "retry") {
           this.schedule();
@@ -233,7 +248,7 @@ async function postSegment(s: AudioSeg): Promise<PostResult> {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 20_000);
   try {
-    const res = await fetch(`/api/audio?${q}`, { method: "POST", credentials: "same-origin", signal: ctl.signal, headers: { "content-type": "audio/wav", ...(s.hostId ? { "x-jam-host": s.hostId } : {}), ...(s.roomId ? { "x-jam-room": s.roomId } : {}) }, body: s.wav });
+    const res = await fetch(`/api/audio?${q}`, { method: "POST", credentials: "same-origin", signal: ctl.signal, headers: { "content-type": "audio/wav", ...(s.hostId ? { "x-jam-host": s.hostId } : {}), "x-jam-room": s.roomId || "unknown" }, body: s.wav });
     markContact();
     if (res.ok) return "ok";
     if (res.status === 401) {
@@ -587,7 +602,7 @@ export class Mic {
     const level = levels.slice(Math.floor(levels.length / 2)).reduce((a, b) => a + b, 0) / Math.max(1, levels.length - Math.floor(levels.length / 2));
     // The brain's own voice coming back through the speakers is not a person.
     if (isEchoSegment(level, this.noise, Date.now() < this.suppressUntil)) return;
-    return audioBuffer.submit({ deviceId: this.deviceId, t0: Math.round(t0), t1: Math.round(t1), level: Number(level.toFixed(1)), noise: Number(this.noise.toFixed(1)), wav: encodeWav(samples), unsynced: !hub.get().clockSynced, epoch: this.segEpoch });
+    return audioBuffer.submit({ deviceId: this.deviceId, t0: Math.round(t0), t1: Math.round(t1), level: Number(level.toFixed(1)), noise: Number(this.noise.toFixed(1)), wav: encodeWav(samples), unsynced: !hub.get().clockSynced, epoch: this.segEpoch, hostId: currentHostKey(), roomId: currentRoom() }); // stamped where it was captured, not when its upload gets its turn
   }
 }
 

@@ -24,7 +24,7 @@ export function limitFor(req: Request): number {
   return (req.headers.get("content-type") ?? "").includes("application/json") ? BODY_LIMITS.json : BODY_LIMITS.other;
 }
 
-/** The body's bytes; null when it passes `max` or isn't finished within `ms` (the read is then dropped). */
+/** The body's bytes; null when it passes `max`; "timeout" when it isn't finished within `ms` or the stream breaks off (the read is then dropped). */
 export async function readBytes(req: Request, max: number, ms = READ_MS.media): Promise<Uint8Array | null | "timeout"> {
   if (!req.body) return new Uint8Array();
   const reader = req.body.getReader();
@@ -44,7 +44,8 @@ export async function readBytes(req: Request, max: number, ms = READ_MS.media): 
       else chunks.length = 0;
     }
   } catch {
-    return late ? "timeout" : null;
+    // The stream broke off (or was cut for taking too long): the body did not arrive whole. That is retryable (408), never "too large".
+    return "timeout";
   } finally {
     clearTimeout(timer);
   }
@@ -74,7 +75,7 @@ export async function buffered(req: Request): Promise<{ req: Request; release: (
   const bytes = await readBytes(req, max, max > BODY_LIMITS.json ? READ_MS.media : READ_MS.small);
   if (bytes === "timeout" || !bytes) {
     release();
-    return bytes === "timeout" ? { status: 408, message: "That request took too long to arrive." } : { status: 413, message: "That request is too large." };
+    return bytes === "timeout" ? { status: 408, message: "That request did not arrive whole. It can be sent again." } : { status: 413, message: "That request is too large." };
   }
   // What was reserved for the worst case is trimmed to what actually arrived (still four times over), so a small body doesn't hold a large share.
   if (!released) {

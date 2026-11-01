@@ -63,3 +63,10 @@ test("a confirmed page reloads when the relay later reaches another host, and no
   await p.exited;
   expect(JSON.parse(out.trim().split("\n").at(-1) ?? "")).toEqual({ same: true, moved: false, movedAgain: false, third: false, reloads: 2 });
 });
+
+test("the host becoming known while the plain offline database is opening doesn't migrate it into itself and erase it", async () => {
+  const p = Bun.spawn(["bun", "run", `${import.meta.dir}/fixtures/host-known-while-opening.ts`], { stdout: "pipe", stderr: "pipe" });
+  const out = await new Response(p.stdout).text();
+  await p.exited;
+  expect(JSON.parse(out.trim().split("\n").at(-1) ?? "")).toEqual({ kept: true });
+});

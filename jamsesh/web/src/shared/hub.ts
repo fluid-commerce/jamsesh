@@ -451,9 +451,11 @@ export function api<T = any>(path: string, body?: unknown, method?: string, opts
   const mutating = m !== "GET" && m !== "HEAD";
   const queueable = mutating && opts.queue !== false && !NEVER_QUEUE.test(path);
   const idem = mutating ? uuid() : undefined;
-  if (!queueable) return send<T>(path, body, m, opts, mutating, false, idem);
+  // Where this edit was made, fixed now: waiting its turn, or being queued, never moves it to another host or session.
+  const stamp = { hostId: currentHostKey(), roomId: currentRoom() };
+  if (!queueable) return send<T>(path, body, m, opts, mutating, false, idem, stamp);
   // Queueable edits go one at a time, in the order they were made: an older one that arrives late can't overwrite a newer one.
-  const run = apiChain.then(() => send<T>(path, body, m, opts, mutating, true, idem));
+  const run = apiChain.then(() => send<T>(path, body, m, opts, mutating, true, idem, stamp));
   apiChain = run.then(
     () => {},
     () => {},
@@ -463,9 +465,9 @@ export function api<T = any>(path: string, body?: unknown, method?: string, opts
 
 let apiChain: Promise<unknown> = Promise.resolve();
 
-async function send<T>(path: string, body: unknown, m: string, opts: ApiOptions, mutating: boolean, queueable: boolean, idem: string | undefined): Promise<T> {
+async function send<T>(path: string, body: unknown, m: string, opts: ApiOptions, mutating: boolean, queueable: boolean, idem: string | undefined, stamp: { hostId: string; roomId: string }): Promise<T> {
   const save = async () => {
-    await outbox.enqueue(m, path, body, idem);
+    await outbox.enqueue(m, path, body, idem, stamp);
     return { ok: true, queued: true, idem } as unknown as T;
   };
 
@@ -481,15 +483,15 @@ async function send<T>(path: string, body: unknown, m: string, opts: ApiOptions,
     throw new OfflineError();
   }
   // A direct send is saved first and removed once the hub has answered, so a window closed mid-request loses nothing.
-  const held = queueable ? await outbox.hold(m, path, body, idem as string).catch(() => undefined) : undefined;
+  const held = queueable ? await outbox.hold(m, path, body, idem as string, stamp).catch(() => undefined) : undefined;
   try {
-    return await sendNow<T>(path, body, m, opts, mutating, queueable, idem, save);
+    return await sendNow<T>(path, body, m, opts, mutating, queueable, idem, save, stamp);
   } finally {
     if (held != null) await outbox.release(held).catch(() => {});
   }
 }
 
-async function sendNow<T>(path: string, body: unknown, m: string, opts: ApiOptions, mutating: boolean, queueable: boolean, idem: string | undefined, save: () => Promise<T>): Promise<T> {
+async function sendNow<T>(path: string, body: unknown, m: string, opts: ApiOptions, mutating: boolean, queueable: boolean, idem: string | undefined, save: () => Promise<T>, stamp: { hostId: string; roomId: string }): Promise<T> {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), opts.timeoutMs ?? (mutating ? 10_000 : 8_000));
   let res: Response;
@@ -501,8 +503,8 @@ async function sendNow<T>(path: string, body: unknown, m: string, opts: ApiOptio
       headers: {
         ...(body === undefined ? {} : { "content-type": "application/json" }),
         ...(idem ? { "x-jam-idem": idem, "x-jam-queued-at": String(Date.now()) } : {}),
-        ...(mutating && isHostConfirmed() && currentHostKey() ? { "x-jam-host": currentHostKey() } : {}),
-        ...(mutating && currentRoom() ? { "x-jam-room": currentRoom() } : {}),
+        ...(mutating && isHostConfirmed() && stamp.hostId ? { "x-jam-host": stamp.hostId } : {}),
+        ...(mutating && stamp.roomId ? { "x-jam-room": stamp.roomId } : {}),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });

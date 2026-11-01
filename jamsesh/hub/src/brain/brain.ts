@@ -1212,7 +1212,8 @@ export class Brain {
     if (from === "agent") for (const name of Object.keys(all)) if (!AGENT_TOOLS.has(name)) delete (all as Record<string, unknown>)[name];
     // Only someone talking to JamSesh on purpose can send, add or dismiss what is waiting on the board, or put a
     // question to an agent (cancelling and pairing above only propose cards when overheard).
-    if (route === "overheard") for (const name of ["triage_card", "ask_agent"]) delete (all as Record<string, unknown>)[name];
+    // An agent's message can still ask another agent a question; nobody but a person acts on a card.
+    if (route === "overheard") for (const name of from === "agent" ? ["triage_card"] : ["triage_card", "ask_agent"]) delete (all as Record<string, unknown>)[name];
     // A file's contents never act: with one attached, only answering and proposing tools are offered (the acting ones
     // propose, above), and with no words, only answering ones.
     const allowed = files ? (answerOnly || batch.some((e) => e.data?.noWords) ? ANSWERING : FILE_TOOLS) : null;

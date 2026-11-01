@@ -157,3 +157,51 @@ test("queued work carries the session it was made in, and one the hub says belon
   expect(r.kind).toBe("drop");
   setRoomSource(() => "");
 });
+
+test("an edit keeps the session it was made in while it waits its turn, and when it has to be queued", async () => {
+  const { setRoomSource } = await import("../src/shared/offline");
+  await (outbox as any).d.table.clear();
+  (outbox as any).entries = [];
+  (outbox as any).publish();
+  setRoomSource(() => "room_A");
+  const rooms: (string | null)[] = [];
+  globalThis.fetch = (async (_u: string, init: any) => {
+    const b = JSON.parse(init.body);
+    rooms.push(new Headers(init.headers).get("x-jam-room"));
+    if (b.n === 1) await Bun.sleep(60); // the first edit is slow, so the second waits its turn
+    if (b.n === 2) throw new Error("down");
+    return new Response("{}");
+  }) as any;
+  const first = api("/tasks/e", { n: 1 }, "PATCH");
+  const second = api("/tasks/e", { n: 2 }, "PATCH"); // made in room A, waiting
+  setRoomSource(() => "room_B"); // the window moves to another session meanwhile
+  await Promise.all([first, second]);
+  expect(rooms[1]).toBe("room_A");
+  const queued = (outbox as any).entries.find((e: any) => e.body?.n === 2);
+  expect(queued?.roomId).toBe("room_A"); // queued under the room it was made in
+  setRoomSource(() => "");
+  outbox.stop();
+});
+
+test("a segment whose adjusted copy can't be saved isn't sent, and keeps its saved original", async () => {
+  const { AudioBuffer } = await import("../src/shared/mic");
+  const { hub } = await import("../src/shared/hub");
+  const rows = new Map<number, any>();
+  let n = 0;
+  const table: any = {
+    all: async () => [...rows.values()],
+    add: async (r: any) => (rows.set(++n, { ...r, seq: n }), n),
+    delete: async (k: number) => void rows.delete(k),
+    replace: async () => {
+      throw new Error("quota");
+    },
+  };
+  let posted = 0;
+  (hub as any).set({ clockOffset: 100 });
+  const buf = new AudioBuffer(table, async () => (posted++, "ok" as const), () => true);
+  await buf.submit({ deviceId: "d", t0: 1000, t1: 1100, level: 1, noise: 0, wav: new ArrayBuffer(44), unsynced: true });
+  expect(posted).toBe(0);
+  const saved = [...rows.values()][0];
+  expect([saved.t0, saved.unsynced]).toEqual([1000, true]); // the original, untouched
+  (hub as any).set({ clockOffset: 0 });
+});
