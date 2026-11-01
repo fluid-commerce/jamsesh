@@ -63,3 +63,15 @@ test("a speech segment is saved before its upload starts and removed after the h
   await Bun.sleep(20);
   expect(rows.size).toBe(1);
 });
+
+test("editing an annotation's text sends only the text, so a queued edit can't reopen a pin someone else finished", async () => {
+  await (outbox as any).d.table.clear();
+  (outbox as any).entries = [];
+  (outbox as any).publish();
+  const sent: any[] = [];
+  globalThis.fetch = (async (_u: string, init: any) => (sent.push(JSON.parse(init.body)), new Response("{}"))) as any;
+  const { patchPinForTest } = await import("../src/shared/annotate");
+  await patchPinForTest({ id: "a1", text: "old", status: "open" } as any, { text: "new" });
+  await patchPinForTest({ id: "a1", text: "new", status: "open" } as any, { status: "done" });
+  expect(sent).toEqual([{ text: "new" }, { status: "done" }]);
+});

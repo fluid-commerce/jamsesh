@@ -306,6 +306,8 @@ export class Hub {
     this.mcp.endWaits();
     // Words held for a recording nobody stopped go to the room now, so the drain and the save include them.
     for (const id of [...this.promptMode.keys()]) this.releasePrompt(id);
+    // A recording still open ends now: its screen lock (taken for it) is given back, not left for a restart to find.
+    for (const r of [...this.recs.values()]) void this.endRecording(r, "disconnect");
     this.brain.quiesce();
     const unfinished = await this.drain(Hub.SHUTDOWN_MS.work);
     if (unfinished.length) console.error(`Shutdown: still working on ${unfinished.join(", ")}; the final save may miss it.`);

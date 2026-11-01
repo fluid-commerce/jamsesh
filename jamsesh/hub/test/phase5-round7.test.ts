@@ -521,3 +521,12 @@ test("a photo or upload whose laptop is disconnected while it's on its way saves
     expect(hub.session.person(p.id)?.photo).toBeFalsy();
   }
 });
+
+test("a person's browser can't upload as the agent that shares its machine; only the agent's own credential does", async () => {
+  const lap = browser("Ona's laptop");
+  const machine = hub.auth.machineOf(lap.device.id)!;
+  const a = hub.session.registerAgent({ ownerName: "Ona", harness: "claude-code", repo: "r", cwd: "/ona", machine, platform: "desktop" }).agent;
+  const before = uploads();
+  expect((await post(lap.token, "/upload", formOf(png(), { agent: a.id, title: "Posed" }))).status).toBe(403);
+  expect(uploads()).toBe(before);
+});

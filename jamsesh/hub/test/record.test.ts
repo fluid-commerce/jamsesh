@@ -1400,3 +1400,13 @@ test("a paired non-host window is the person it is paired to, whatever personId 
   expect((await r.post("/record/cancel", { deviceId: "mayaLaptop", token: "rt_zzzzzzzzzzzzzzzz" }, asBen)).status).toBe(403);
   expect((await r.get(`/record/${rid(r, "mayaLaptop")}?deviceId=mayaLaptop`, asBen)).status).toBe(403);
 }, 30_000);
+
+test("a shutdown ends a recording that took a screen's lock, so a restart doesn't find the screen held", async () => {
+  const r = room();
+  const ok = await r.post("/record/start", { deviceId: "mayaLaptop", personId: r.maya.id, screen: "main" });
+  expect(ok.status).toBe(200);
+  expect(r.s.lockOf("main")?.personId).toBe(r.maya.id);
+  await r.hub.shutdown();
+  expect(r.s.lockOf("main")).toBeNull();
+  expect(r.s.recordings()).toEqual([]);
+}, 60_000);

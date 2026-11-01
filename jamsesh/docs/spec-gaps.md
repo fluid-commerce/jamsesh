@@ -21,19 +21,9 @@ The mic now defaults to on unless the person muted it (`web/src/client/ClientVie
 
 `addressesBrain` (`hub/src/brain/brain.ts`) matches the name only as a form of address, whole words, and prompts typed to agents are never direct addresses.
 
-### 3. A gateway error silently drops what the room said [A16a, B14, B16]
+### 3. Resolved in the release candidate
 
-- **Spec:** when a gateway call fails, the brain falls back to rules for that batch and shows it,
-  so nothing said is lost (SPEC 8.13).
-- **Code:** `triage()` falls back to rules only when there's no model or the output is null; a
-  thrown error propagates to `flush()`, which logs it and drops the batch
-  (`hub/src/brain/brain.ts:115-117`, `:143`). Errors inside `direct()` show nothing to the room. Rule
-  routing runs only with no key or when the router call itself throws (`:166`).
-- **Effect tomorrow:** one gateway timeout or rate limit and a directive or decision vanishes with
-  no sign it was heard.
-- **Close it:** catch errors in triage and direct passes, run `ruleTriage`/`ruleRoute` on the same
-  batch, toast "The brain couldn't reach the gateway; routed by keyword", and add a test with a
-  throwing model.
+A failed gateway call is caught, the brain says so (`gatewayTrouble`) and the batch is judged by the rules (`ruleTriage`, `ruleRoute`) instead of being dropped (`hub/src/brain/brain.ts`).
 
 ### 4. The brain runs shell commands and builds with no person's approval [A33a, B41, security]
 
@@ -105,21 +95,9 @@ The mic now defaults to on unless the person muted it (`web/src/client/ClientVie
 - **Close it:** use Codex's notify and hook mechanisms where available; otherwise have the Codex
   prompt require `jam_wait` at the end of every turn and post its own prompts with `jam_update`.
 
-### 10. Local transcription needs a manual Homebrew install; English only [B28a]
+### 10. Resolved in the release candidate
 
-- **Spec:** the host app downloads the speech engine and model on first use; transcription handles
-  the team's languages (SPEC 3.2, 9.3, 15).
-- **Code:** `app/bundle-hub.sh:10-18` bundles the speaker model but not whisper; no code downloads
-  the whisper model (only `install.sh:19-21`, `:42-46` does, for developers). The hub looks for
-  `/opt/homebrew/bin/whisper-server` and `~/.cache/whisper-cpp/ggml-*.bin`
-  (`hub/src/config.ts:99-106`) and otherwise uses the gateway. README says `brew install
-  whisper-cpp`, which installs the binary but not the model. whisper runs with `-l en`
-  (`hub/src/audio/transcribe.ts:49`).
-- **Effect tomorrow:** an app-only host transcribes every line through the gateway (cost, latency,
-  and no transcription if the key fails), silently.
-- **Close it:** bundle `whisper-server` (or fetch it) and download the model on first host start
-  with progress in **Set up this Mac**; make the language a setting (default auto-detect); show
-  which engine is in use on the big screen.
+The app bundles whisper.cpp's server (`app/bundle-hub.sh`, `app/build-whisper.sh`), the hub downloads and verifies the model on the first host session (`hub/src/audio/whisper.ts`), and whisper runs with automatic language detection (`-l auto`). The language is not yet a setting, and the big screen does not show which engine is in use.
 
 ## Tier 2: will be noticed in the session
 

@@ -167,9 +167,12 @@ function usePins() {
 }
 
 async function patchPin(a: Annotation, fields: { text?: string; status?: Annotation["status"] }) {
-  // The hub spreads both fields over the record, so always send both.
-  return api(`/annotations/${a.id}`, { text: fields.text ?? a.text, status: fields.status ?? a.status }, "PATCH");
+  // Only what changed: a queued edit replayed later must not write an old status back over someone else's change.
+  return api(`/annotations/${a.id}`, { ...(fields.text !== undefined ? { text: fields.text } : {}), ...(fields.status !== undefined ? { status: fields.status } : {}) }, "PATCH");
 }
+
+/** For tests. */
+export const patchPinForTest = patchPin;
 
 async function removePin(id: string) {
   goneStore.set((g) => [...g, id]);

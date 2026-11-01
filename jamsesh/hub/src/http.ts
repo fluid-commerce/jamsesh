@@ -1258,6 +1258,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     const agent = named ? s.agent(named) ?? null : null;
     if (named && !agent) return bad("That agent isn't yours to upload for.", 403); // the same answer as another machine's agent: whether an id exists is not told
     if (!hostWindow) {
+      // Only an agent's own credential posts for an agent: a person's browser on the same machine does not.
+      if (!paired || paired.kind !== "agent") return bad("Uploads for an agent come from the agent's own credential.", 403);
       if (!agent) return bad("Name your agent (-F agent=<id>); only the host posts for the room.", 403);
       if (agent.machine !== (paired ? hub.auth.machineOf(paired.id) : null)) return bad("That agent is on another machine; post as yourself.", 403);
       if (form.get("replaces")) return bad("To post a new version of a screen, use jam_post_image with replaces.", 403);
