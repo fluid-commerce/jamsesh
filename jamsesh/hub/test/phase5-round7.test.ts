@@ -555,3 +555,22 @@ test("cookie-authenticated browsers don't share a replay record either", async (
   expect((await send(a.token)).headers.get("x-jam-idem-replay")).toBe("1");
   expect((await send(b.token)).headers.get("x-jam-idem-replay")).toBeNull();
 });
+
+test("a paired browser's pin carries its own person and name, even when the body names someone else or leaves the person out", async () => {
+  const kit = hub.session.upsertPerson({ name: "Mo" });
+  const other = hub.session.upsertPerson({ name: "Zed" });
+  const mine = hub.auth.issue({ kind: "browser", label: "Mo's laptop", ip: "10.0.0.41", personId: kit.id });
+  const pin = async (body: object) => (await (await call(mine.token, "POST", "/annotations", { target: { kind: "artifact", ref: "x" }, x: 0.1, y: 0.1, text: "hi", ...body })).json()) as any;
+  expect((await pin({ authorName: "Zed" })).authorName).toBe("Mo");
+  expect((await pin({ personId: other.id, authorName: "Zed" })).authorName).toBe("Mo");
+  expect((await pin({ personId: other.id })).personId).toBe(kit.id);
+});
+
+test("a change made in another session (a fresh room on the same host) is refused with the room named, and one for this room goes through", async () => {
+  const mine = hub.auth.issue({ kind: "browser", label: "Pat's laptop", ip: "10.0.0.42" });
+  const send = (room: string) => fetch(`${base}/api/settings`, { method: "POST", headers: { "x-forwarded-for": "9.9.9.9", authorization: `Bearer ${mine.token}`, "content-type": "application/json", "x-jam-room": room }, body: JSON.stringify({ sessionName: "Pat's room" }) });
+  const old = await send("room_yesterday");
+  expect(old.status).toBe(409);
+  expect(await old.text()).toContain("different JamSesh session");
+  expect((await send(hub.session.roomId())).status).toBe(200);
+});

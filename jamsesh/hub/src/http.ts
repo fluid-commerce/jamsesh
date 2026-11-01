@@ -430,6 +430,9 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           // A change made for another host (an offline queue replayed after the relay switched hosts) never lands here.
           const meant = req.headers.get("x-jam-host");
           if (meant && MUTATING.has(req.method) && meant !== hostIdOf(hub)) return new Response("That change was made for a different JamSesh host.", { status: 409, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
+          // A session started since (a fresh project session on the same host) is another room: yesterday's queued call or speech does not land in today's.
+          const room = req.headers.get("x-jam-room");
+          if (room && path.startsWith("/api/") && !path.startsWith("/api/hooks/") && MUTATING.has(req.method) && room !== hub.session.roomId()) return new Response("That change was made for a different JamSesh session.", { status: 409, headers: { "content-type": "text/plain" } });
           return await idempotent(hub, req, path, hostWindow ? "window" : `device:${(device as { id?: string } | null | undefined)?.id ?? ""}`, () => api(hub, req, url, ip, device, hostWindow, !seesAll));
         }
         // A frame drawn at the size the screen asked for (the stored render is capped at 1600 px): /renders/full/<artifact id>.png?size=2400
@@ -1392,6 +1395,11 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
   // ---- annotations ----
   if (path === "/annotations" && req.method === "POST") {
     if (!body?.target?.kind || typeof body.x !== "number") return bad("target and x, y are required");
+    // A paired browser's pin is its own person's: the person and the name come from the credential, whatever the body says (or leaves out).
+    if (paired && !hostWindow) {
+      body.personId = paired.personId ?? null;
+      delete body.authorName;
+    }
     const ann = s.addAnnotation({ personId: body.personId ?? null, authorName: body.authorName, target: body.target, x: body.x, y: body.y, text: String(body.text ?? ""), source: body.source === "pointer" ? "pointer" : "pin" });
     if (ann.target.kind === "canvas" && ann.target.canvasX != null) hub.canvas.comment(ann).catch(() => {});
     return json(ann);

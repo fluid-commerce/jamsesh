@@ -420,8 +420,8 @@ export class McpEndpoint {
       return { idle: false };
     }
     // A batch with a wait in it isn't supported: it could not be tied to one reply.
-    if (Array.isArray(msg)) return msg.some((m) => m?.method === "tools/call" && m?.params?.name === "jam_wait") ? { idle: false, reject: "Send jam_wait as a message of its own, not in a batch." } : { idle: false };
-    if (msg?.method !== "tools/call" || msg?.params?.name !== "jam_wait") return { idle: false };
+    if (Array.isArray(msg)) return msg.some((m) => m?.method === "tools/call" && (m?.params?.name === "jam_wait" || m?.params?.name === "jam_inbox")) ? { idle: false, reject: "Send jam_wait and jam_inbox as messages of their own, not in a batch." } : { idle: false };
+    if (msg?.method !== "tools/call" || (msg?.params?.name !== "jam_wait" && msg?.params?.name !== "jam_inbox")) return { idle: false };
     const sid = req.headers.get("mcp-session-id");
     if (!sid || msg.id == null) return { idle: false };
     // Keyed by the id with its type (1 and "1" are two requests), and removed only by the record that made it.

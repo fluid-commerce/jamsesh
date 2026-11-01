@@ -1023,3 +1023,23 @@ test("jam_inbox marks items read only once its reply has been sent: a dropped re
     hub.stop();
   }
 });
+
+test("a real jam_inbox call is tracked like jam_wait, so its items are marked read only when the reply has gone out; in a batch it is refused", async () => {
+  process.env.JAMSESH_SILENT = "1";
+  const { Hub } = await import("../src/hub");
+  const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "inbox-classify"), teamDir: join(dir, "team-ic") });
+  try {
+    clearInterval((hub.brain as any).digestTimer);
+    const post = (body: unknown) => new Request("http://x/mcp", { method: "POST", headers: { "mcp-session-id": "s1", "content-type": "application/json" }, body: JSON.stringify(body) });
+    const call = (id: number, name: string) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: {} } });
+    const one = await hub.mcp.classify(post(call(5, "jam_inbox")));
+    expect(one.live).toBeDefined();
+    const batch = await hub.mcp.classify(post([call(6, "jam_inbox"), call(7, "jam_update")]));
+    expect(batch.reject).toContain("own");
+    const other = await hub.mcp.classify(post(call(8, "jam_update")));
+    expect(other.live).toBeUndefined();
+  } finally {
+    hub.devproxy.stop();
+    hub.stop();
+  }
+});

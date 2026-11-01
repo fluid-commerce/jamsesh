@@ -61,5 +61,5 @@ test("a confirmed page reloads when the relay later reaches another host, and no
   const p = Bun.spawn(["bun", "run", `${import.meta.dir}/fixtures/confirmed-host-moves.ts`], { stdout: "pipe", stderr: "pipe" });
   const out = await new Response(p.stdout).text();
   await p.exited;
-  expect(JSON.parse(out.trim().split("\n").at(-1) ?? "")).toEqual({ same: true, moved: false, reloads: 1 });
+  expect(JSON.parse(out.trim().split("\n").at(-1) ?? "")).toEqual({ same: true, moved: false, movedAgain: false, third: false, reloads: 2 });
 });

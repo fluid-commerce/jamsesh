@@ -201,6 +201,8 @@ export interface OutboxEntry {
   createdAt: number;
   /** The host this call was made for; it only replays to that host. */
   hostId?: string;
+  /** The session (room) this was made in; a hub on another session refuses it. */
+  roomId?: string;
   /** Consecutive HTTP 5xx answers; a call the hub keeps choking on is dropped. */
   serverFails: number;
 }
@@ -313,7 +315,7 @@ export class Outbox {
   /** Queue a call. Resolves once it is durable. */
   async enqueue(method: string, path: string, body?: unknown, idem: string = uuid()): Promise<OutboxEntry> {
     await this.load();
-    const e: OutboxEntry = { idem, method, path, body, createdAt: this.now(), serverFails: 0, hostId: this.d.hostId?.() ?? "" };
+    const e: OutboxEntry = { idem, method, path, body, createdAt: this.now(), serverFails: 0, hostId: this.d.hostId?.() ?? "", roomId: currentRoom() };
     e.seq = await this.d.table.add(e);
     this.entries.push(e);
     this.entries.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
@@ -329,7 +331,7 @@ export class Outbox {
    */
   async hold(method: string, path: string, body: unknown, idem: string): Promise<number | undefined> {
     await this.load();
-    const e: OutboxEntry = { idem, method, path, body, createdAt: this.now(), serverFails: 0, hostId: this.d.hostId?.() ?? "" };
+    const e: OutboxEntry = { idem, method, path, body, createdAt: this.now(), serverFails: 0, hostId: this.d.hostId?.() ?? "", roomId: currentRoom() };
     return this.d.table.add(e);
   }
 
@@ -449,6 +451,7 @@ export async function sendEntry(e: OutboxEntry): Promise<SendResult> {
         "x-jam-idem": e.idem,
         "x-jam-queued-at": String(e.createdAt),
         ...(e.hostId ? { "x-jam-host": e.hostId } : {}),
+        ...(e.roomId ? { "x-jam-room": e.roomId } : {}),
       },
       body: e.body === undefined ? undefined : JSON.stringify(e.body),
     });
@@ -460,7 +463,12 @@ export async function sendEntry(e: OutboxEntry): Promise<SendResult> {
       return { kind: "retry", server: res.status === 500 };
     }
     // The hub answers 409 (plain text) when x-jam-host names another host; other 409s are real refusals.
-    if (res.status === 409 && e.hostId && /different JamSesh host/i.test(await res.text().catch(() => ""))) return { kind: "otherHost" };
+    if (res.status === 409) {
+      const said = await res.text().catch(() => "");
+      if (e.hostId && /different JamSesh host/i.test(said)) return { kind: "otherHost" };
+      // Made in an earlier session: it does not belong in this one, and is dropped (counted, so the banner can say so).
+      if (/different JamSesh session/i.test(said)) return { kind: "drop", status: 409 };
+    }
     return { kind: "drop", status: res.status };
   } catch {
     return { kind: "retry" };
@@ -487,7 +495,7 @@ export async function hostVerified(): Promise<boolean> {
     const id = String((await r.json()).hostId ?? "");
     const ok = confirmHostKey(id);
     // The relay now reaches another host than this page was loaded for: reload once so the identity and the records follow the host.
-    if (!ok && id && currentHostKey() && id !== currentHostKey()) reloadForNewHost();
+    if (!ok && id && currentHostKey() && id !== currentHostKey()) reloadForNewHost(id);
     return ok;
   } catch {
     return false;
@@ -501,22 +509,31 @@ export async function recheckHost(): Promise<boolean> {
     const r = await fetch("/api/pair/info", { signal: AbortSignal.timeout(2500) });
     const id = String((await r.json()).hostId ?? "");
     if (id && id !== currentHostKey()) {
-      reloadForNewHost();
+      reloadForNewHost(id);
       return false;
     }
   } catch {}
   return true;
 }
 
-function reloadForNewHost() {
+function reloadForNewHost(to: string) {
   try {
+    // A reload toward the same host is not repeated within 15 s (no loop); a different destination (A to B to C) always reloads.
     const key = "jamsesh.hostReload";
-    const last = Number(sessionStorage.getItem(key) ?? 0);
-    if (Date.now() - last < 15_000 || typeof location === "undefined" || typeof location.reload !== "function") return;
-    sessionStorage.setItem(key, String(Date.now()));
+    const last = JSON.parse(sessionStorage.getItem(key) ?? "{}") as { to?: string; at?: number };
+    if (last.to === to && Date.now() - (last.at ?? 0) < 15_000) return;
+    if (typeof location === "undefined" || typeof location.reload !== "function") return;
+    sessionStorage.setItem(key, JSON.stringify({ to, at: Date.now() }));
     location.reload();
   } catch {}
 }
+
+let roomSource: () => string = () => "";
+/** hub.ts says which session this window is showing, so queued work is stamped with it. */
+export function setRoomSource(fn: () => string) {
+  roomSource = fn;
+}
+export const currentRoom = () => roomSource();
 
 export const outbox = new Outbox({ table: idbTable<OutboxEntry>("outbox"), send: sendEntry, hostId: currentHostKey, canSend: hostVerified });
 

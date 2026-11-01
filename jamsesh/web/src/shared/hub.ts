@@ -2,7 +2,7 @@
 // every change after it. Components read it through useHub().
 import { useSyncExternalStore } from "react";
 import { currentHostKey, isHostConfirmed, readDeviceId, readPref, writePref } from "./identity";
-import { hostVerified, markContact, recheckHost, onContact, outbox, uuid } from "./offline";
+import { currentRoom, hostVerified, markContact, recheckHost, setRoomSource, onContact, outbox, uuid } from "./offline";
 import type { BusMessage, HubState, JamEvent, Stage, Utterance } from "../../../hub/src/types";
 
 export type { HubState, JamEvent, Stage, Utterance };
@@ -409,6 +409,7 @@ class HubClient {
 export const removedChatsSource = (s: Pick<Snapshot, "state" | "epoch" | "removedChatsRev">) => `${s.state?.session?.roomId ?? ""}|${s.epoch}|${s.removedChatsRev}`;
 
 export const hub = new HubClient();
+setRoomSource(() => hub.get().state?.session?.roomId ?? "");
 
 export function useHub() {
   return useSyncExternalStore(hub.subscribe, hub.get, hub.get);
@@ -501,6 +502,7 @@ async function sendNow<T>(path: string, body: unknown, m: string, opts: ApiOptio
         ...(body === undefined ? {} : { "content-type": "application/json" }),
         ...(idem ? { "x-jam-idem": idem, "x-jam-queued-at": String(Date.now()) } : {}),
         ...(mutating && isHostConfirmed() && currentHostKey() ? { "x-jam-host": currentHostKey() } : {}),
+        ...(mutating && currentRoom() ? { "x-jam-room": currentRoom() } : {}),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
@@ -539,6 +541,7 @@ async function sendNow<T>(path: string, body: unknown, m: string, opts: ApiOptio
     if (queueable && res.status === 408) return save();
     // The relay moved to another host while this was on its way: the change is still wanted. It
     // waits in the outbox, with the same idempotency key and host stamp, until its own host is back.
+    if (res.status === 409 && /different JamSesh session/i.test(text)) throw Object.assign(new Error("This window was showing an earlier session. Reload it to join the current one."), { status: 409 });
     if (res.status === 409 && /different JamSesh host/i.test(text)) {
       if (queueable) return save();
       throw Object.assign(new Error("That was meant for the host this window was showing; it changed. Try again."), { status: 409 });

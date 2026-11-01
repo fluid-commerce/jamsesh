@@ -1,12 +1,19 @@
 // Edits go out one at a time in the order they were made, and a direct send is saved before it leaves and removed
 // once the hub answers, so a window closed mid-request still has it next time. fetch is stubbed; nothing plays.
 import "fake-indexeddb/auto";
-import { afterEach, expect, test } from "bun:test";
+import { afterAll, afterEach, expect, test } from "bun:test";
 import { api } from "../src/shared/hub";
 import { outbox } from "../src/shared/offline";
 
 const realFetch = globalThis.fetch;
 afterEach(() => (globalThis.fetch = realFetch));
+// Nothing this file queued is left for a test in another file (they share the process and its outbox).
+afterAll(async () => {
+  outbox.stop();
+  await (outbox as any).d.table.clear();
+  (outbox as any).entries = [];
+  (outbox as any).publish();
+});
 
 test("two edits made back to back reach the hub in the order they were made, even when the first is slow", async () => {
   const seen: string[] = [];
@@ -120,4 +127,33 @@ test("a speech segment carries the host it was captured for, and one refused by 
   expect(seen[0]).toBe("hostA");
   expect(rows.size).toBe(1); // refused for now: kept
   buf.kick();
+});
+
+test("a segment captured before the clock synced is sent with the same times on every attempt, even if the offset changes between them", async () => {
+  const { AudioBuffer } = await import("../src/shared/mic");
+  const { hub } = await import("../src/shared/hub");
+  const rows = new Map<number, any>();
+  let n = 0;
+  const table: any = { all: async () => [...rows.values()], add: async (r: any) => (rows.set(++n, { ...r, seq: n }), n), delete: async (k: number) => void rows.delete(k) };
+  const times: number[] = [];
+  let tries = 0;
+  const post = async (s: any) => (times.push(s.t0), ++tries === 1 ? ("retry" as const) : ("ok" as const));
+  (hub as any).set({ clockOffset: 100 });
+  const buf = new AudioBuffer(table, post, () => true);
+  await buf.submit({ deviceId: "d", t0: 1000, t1: 1100, level: 1, noise: 0, wav: new ArrayBuffer(44), unsynced: true });
+  (hub as any).set({ clockOffset: 250 }); // a later sync moves the offset
+  await buf.kick();
+  expect(times).toEqual([1100, 1100]);
+  (hub as any).set({ clockOffset: 0 });
+});
+
+test("queued work carries the session it was made in, and one the hub says belongs to another session is dropped, not retried", async () => {
+  const { sendEntry, setRoomSource } = await import("../src/shared/offline");
+  setRoomSource(() => "room_today");
+  const seen: (string | null)[] = [];
+  globalThis.fetch = (async (_u: string, init: any) => (seen.push(new Headers(init.headers).get("x-jam-room")), new Response("That change was made for a different JamSesh session.", { status: 409 }))) as any;
+  const r = await sendEntry({ idem: "i1", method: "POST", path: "/say", body: {}, createdAt: Date.now(), serverFails: 0, hostId: "", roomId: "room_yesterday" } as any);
+  expect(seen).toEqual(["room_yesterday"]);
+  expect(r.kind).toBe("drop");
+  setRoomSource(() => "");
 });

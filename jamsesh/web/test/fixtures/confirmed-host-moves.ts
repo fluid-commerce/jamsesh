@@ -14,5 +14,8 @@ globalThis.fetch = (async () => Response.json({ hostId: host })) as any;
 const same = await recheckHost();
 host = "hostB";
 const moved = await recheckHost();
-console.log(JSON.stringify({ same, moved, reloads: (globalThis as any).__reloads ?? 0 }));
+const movedAgain = await recheckHost(); // the same destination again within seconds: not reloaded twice
+host = "hostC";
+const third = await recheckHost(); // a different destination: reloads
+console.log(JSON.stringify({ same, moved, movedAgain, third, reloads: (globalThis as any).__reloads ?? 0 }));
 process.exit(0);

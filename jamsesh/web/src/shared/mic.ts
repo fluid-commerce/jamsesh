@@ -7,7 +7,7 @@
 import { useSyncExternalStore } from "react";
 import { hub, pref } from "./hub";
 import { currentHostKey } from "./identity";
-import { backoffMs, createStore, idbTable, markContact } from "./offline";
+import { backoffMs, createStore, currentRoom, idbTable, markContact } from "./offline";
 
 const RATE = 16000;
 const FRAME = 320; // 20 ms
@@ -63,6 +63,8 @@ export interface AudioSeg {
   seq?: number;
   /** The host this was captured for; it is only ever sent to that host. */
   hostId?: string;
+  /** The session it was captured in. */
+  roomId?: string;
   deviceId: string;
   t0: number;
   t1: number;
@@ -130,11 +132,13 @@ export class AudioBuffer {
 
   private async submitOne(seg: AudioSeg) {
     seg.hostId ??= currentHostKey();
+    seg.roomId ??= currentRoom();
     await this.load();
     const direct = !this.rows.length && !this.draining && this.canSend();
     // Saved before it is sent: if the window closes while the upload is out, the segment is still here next time.
     seg.seq = await this.table.add(seg);
     if (direct) {
+      await this.stamp(seg);
       const r = await this.post(seg);
       if (r === "ok" || r === "drop") {
         await this.table.delete(seg.seq);
@@ -147,6 +151,19 @@ export class AudioBuffer {
     await this.trim();
     this.publish();
     void this.drain();
+  }
+
+  /** A segment captured before the clock synced gets the clock offset once, saved with it: a retry sends the same times, so the hub's duplicate check can recognize it. */
+  private async stamp(s: AudioSeg) {
+    if (!s.unsynced) return;
+    const shift = hub.get().clockOffset;
+    s.t0 += shift;
+    s.t1 += shift;
+    s.unsynced = false;
+    if (s.seq != null) {
+      await this.table.delete(s.seq);
+      s.seq = await this.table.add(s);
+    }
   }
 
   private done() {
@@ -173,6 +190,7 @@ export class AudioBuffer {
     try {
       while (this.rows.length && this.canSend()) {
         const s = this.rows[0];
+        await this.stamp(s);
         const r = await this.post(s);
         if (r === "retry") {
           this.schedule();
@@ -215,7 +233,7 @@ async function postSegment(s: AudioSeg): Promise<PostResult> {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 20_000);
   try {
-    const res = await fetch(`/api/audio?${q}`, { method: "POST", credentials: "same-origin", signal: ctl.signal, headers: { "content-type": "audio/wav", ...(s.hostId ? { "x-jam-host": s.hostId } : {}) }, body: s.wav });
+    const res = await fetch(`/api/audio?${q}`, { method: "POST", credentials: "same-origin", signal: ctl.signal, headers: { "content-type": "audio/wav", ...(s.hostId ? { "x-jam-host": s.hostId } : {}), ...(s.roomId ? { "x-jam-room": s.roomId } : {}) }, body: s.wav });
     markContact();
     if (res.ok) return "ok";
     if (res.status === 401) {
@@ -223,7 +241,7 @@ async function postSegment(s: AudioSeg): Promise<PostResult> {
       return "unauthorized";
     }
     // 409: the relay now reaches another host than this was captured for; it stays here for its own host.
-    if (res.status === 409) return "retry";
+    if (res.status === 409) return /different JamSesh session/i.test(await res.text().catch(() => "")) ? "drop" : "retry"; // an earlier session's speech is dropped; another host's waits
     // 404: this window's device isn't registered with the host yet (it is a moment after joining).
     return res.status >= 500 || res.status === 404 || res.status === 408 || res.status === 429 ? "retry" : "drop";
   } catch {
