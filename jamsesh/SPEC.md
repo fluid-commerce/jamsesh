@@ -651,7 +651,11 @@ A26c].
   change to something that changed on the host while you were away is merged field by field, and
   a change to something that was deleted is dropped and reported in the banner rather than
   recreating it [A26d].
-- The host remembers idempotency keys across restarts for 24 hours.
+- The host remembers idempotency keys across restarts for seven days (as long as a laptop keeps a queued change), in its database.
+  A reply is saved right after its change is made, not in the same database transaction: a hard crash in that instant (milliseconds)
+  can let a retry with the same key repeat that one change. A direct send is also saved on the laptop before it leaves and removed
+  once the host answers; where the browser blocks its storage (a private window) it is held in memory only, so a window closed
+  mid-request can lose that one edit, as a queued edit can in the same case.
 
 ### 5.3 Identity memory
 

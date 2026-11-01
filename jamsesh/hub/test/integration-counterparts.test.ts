@@ -760,3 +760,52 @@ test("a refused screen change doesn't count as the room's latest, so it can't ho
     hub.stop();
   }
 });
+
+test("a NAT-PMP renewal answered with a different port takes that forward back and reports it, instead of waiting on itself", async () => {
+  const dgram = await import("node:dgram");
+  const { PortMapper } = await import("../src/net/router");
+  const sock = dgram.createSocket("udp4");
+  const seen: number[] = [];
+  sock.on("message", (msg, rinfo) => {
+    const op = msg[1];
+    if (op === 0) {
+      const r = Buffer.alloc(12);
+      r.writeUInt8(128, 1);
+      r.writeUInt32BE(1, 4);
+      Buffer.from([203, 0, 113, 7]).copy(r, 8);
+      sock.send(r, rinfo.port, rinfo.address);
+    } else if (op === 2) {
+      const life = msg.readUInt32BE(8);
+      seen.push(life);
+      const r = Buffer.alloc(16);
+      r.writeUInt8(130, 1);
+      r.writeUInt32BE(1, 4);
+      r.writeUInt16BE(msg.readUInt16BE(4), 8);
+      r.writeUInt16BE(life === 0 ? msg.readUInt16BE(6) : 50443, 10); // a renewal gets another port
+      r.writeUInt32BE(life, 12);
+      sock.send(r, rinfo.port, rinfo.address);
+    }
+  });
+  try {
+    await new Promise<void>((res, rej) => {
+      sock.once("error", rej);
+      sock.bind(5351, "127.0.0.1", () => res());
+    });
+  } catch {
+    sock.close();
+    return; // port 5351 is in use on this machine: nothing to check here
+  }
+  try {
+    const m: any = new PortMapper();
+    m.current = { gateway: "127.0.0.1", method: "nat-pmp", internalPort: 4443, externalPort: 443, lanIp: "10.0.0.2" };
+    const lost: string[] = [];
+    m.onLost = (msg: string) => lost.push(msg);
+    await Promise.race([m.renew(), Bun.sleep(4000).then(() => Promise.reject(new Error("renewal waited on itself")))]);
+    expect(lost.length).toBe(1);
+    expect(lost[0]).toContain("50443");
+    expect(m.current).toBeUndefined();
+    expect(seen).toContain(0); // the moved forward was deleted
+  } finally {
+    sock.close();
+  }
+});

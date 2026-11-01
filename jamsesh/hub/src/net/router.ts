@@ -318,7 +318,7 @@ export class PortMapper {
         else if (r.externalPort !== c.externalPort) {
           // The router moved it: the public link would point at the wrong port, so that forward is taken back and the loss is reported.
           this.current = { ...c, externalPort: r.externalPort };
-          await this.unmap();
+          await this.unmap(true);
           this.onLost?.(`The router moved the port forward to port ${r.externalPort}, so remote access no longer works. Press Retry.`);
           return;
         } else lifetime = Math.min(LEASE, r.lifetimeSec || LEASE);
@@ -344,18 +344,19 @@ export class PortMapper {
   }
 
   /** Removes the mapping (NAT-PMP: lifetime 0; UPnP: DeletePortMapping). True once the router has said it is gone (or there was none); false when that couldn't be confirmed, and the mapping is kept to try again. */
-  unmap(): Promise<boolean> {
+  unmap(fromRenewal = false): Promise<boolean> {
     // One delete at a time: a second caller shares the first's outcome instead of seeing an emptied record and calling it closed.
-    return (this.unmapping ??= this.unmapOnce().finally(() => (this.unmapping = undefined)));
+    return (this.unmapping ??= this.unmapOnce(fromRenewal).finally(() => (this.unmapping = undefined)));
   }
   private unmapping?: Promise<boolean>;
 
-  private async unmapOnce(): Promise<boolean> {
+  /** `fromRenewal`: called from inside the renewal itself, which must not wait for itself. */
+  private async unmapOnce(fromRenewal: boolean): Promise<boolean> {
     this.unrenew();
     const c = this.current ?? this.maybe;
     this.current = undefined; // a renewal queued from here on finds nothing to renew
     this.maybe = undefined;
-    await this.renewing.catch(() => {});
+    if (!fromRenewal) await this.renewing.catch(() => {});
     if (!c) return true;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {

@@ -251,16 +251,17 @@ The mic now defaults to on unless the person muted it (`web/src/client/ClientVie
 - **Close it:** send an implement directive for offline decisions with a matched artifact; fix the
   intent precedence and use whole-word platform matches.
 
-### 25. "Exactly once" doesn't survive a hub restart [A26d]
+### 25. "Exactly once" has a millisecond gap on a crash [A26d]
 
-- **Spec:** the host remembers idempotency keys for 24 hours across restarts; queued changes merge
-  field by field, and changes to deleted items are dropped and reported (SPEC 5.2).
-- **Code:** the replay cache is in memory (`hub/src/http.ts:494-532`), so a restart can apply a
-  queued change twice. There's no merge: queued calls replay as last writer wins, and the client
-  has no local copy of session state. `x-jam-queued-at` is sent but never read.
-- **Close it:** store idempotency keys in SQLite; have PATCH handlers compare `x-jam-queued-at` with
-  the record's update time and merge fields; return 410 for deleted targets and surface it in the
-  banner.
+- **Spec:** the host remembers idempotency keys across restarts; queued changes merge field by
+  field, and changes to deleted items are dropped and reported (SPEC 5.2).
+- **Code:** keys and replies are stored in SQLite for seven days (`hub/src/store.ts`, `idempotent()` in
+  `hub/src/http.ts`), so a restart replays the first answer. The reply is saved right after the change, in a separate write,
+  so a hard crash between the two lets a retry repeat that one change. There's no field-by-field merge: queued calls replay as
+  last writer wins. `x-jam-queued-at` is sent but never read.
+- **Close it:** make each replayable change and its key one transaction (handlers are async, so this
+  means restructuring them); compare `x-jam-queued-at` with the record's update time and merge fields;
+  return 410 for deleted targets and surface it in the banner.
 
 ## Tier 3: matters later, or polish
 
