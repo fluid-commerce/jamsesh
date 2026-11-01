@@ -958,8 +958,7 @@ export class Brain {
             else if (t.kind === "canvas") tiles.push({ kind: "canvas", follow: t.follow ?? null, page: t.page ?? null, label: t.label });
             else if (t.kind === "web" && t.ref && /^https?:\/\//.test(t.ref)) {
               // Local addresses must be dev servers the agents registered; don't guess ports.
-              const local = /^https?:\/\/(localhost|127\.|0\.0\.0\.0|192\.168\.|10\.)/.test(t.ref);
-              if (local && !s.devservers().some((d) => t.ref!.startsWith(d.url))) continue;
+              if (isLocalUrl(t.ref) && !s.devservers().some((d) => sameOrigin(t.ref!, d.url))) continue;
               tiles.push({ kind: "web", url: t.ref, label: t.label });
             }
             else if (t.kind === "screen" && t.ref && s.store.get("shares", t.ref)) tiles.push({ kind: "screen", shareId: t.ref, label: t.label });
@@ -2038,3 +2037,39 @@ Do not write decisions, open questions, who owns what, repositories, branches, b
  * isn't accepted however it was sent: what the files say becomes knowledge only through a card a person adds.
  */
 export const acceptedEvent = (e: JamEvent) => (e.kind === "decision" && e.authorType === "brain") || e.kind === "directive" || (e.authorType === "person" && !!e.data?.direct && !(Array.isArray(e.data?.attachments) && e.data.attachments.length));
+
+/** Whether a URL points at this computer or a private network: loopback, link-local, private and shared ranges, .local names, in any spelling the URL parser normalizes. */
+export function isLocalUrl(raw: string): boolean {
+  let host: string;
+  try {
+    host = new URL(raw).hostname.toLowerCase();
+  } catch {
+    return true; // not a URL we can read: not shown
+  }
+  host = host.replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal") || !host.includes(".") && !host.includes(":")) return true;
+  const v4 = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+  }
+  if (host.includes(":")) {
+    const mapped = host.match(/^::ffff:(?:(\d+\.\d+\.\d+\.\d+)|([0-9a-f]{1,4}):([0-9a-f]{1,4}))$/);
+    if (mapped?.[1]) return isLocalUrl(`http://${mapped[1]}/`);
+    if (mapped) {
+      const hi = parseInt(mapped[2], 16);
+      const lo = parseInt(mapped[3], 16);
+      return isLocalUrl(`http://${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}/`);
+    }
+    return host === "::" || host === "::1" || /^f[cd][0-9a-f]{2}:/.test(host) || /^fe[89ab][0-9a-f]:/.test(host);
+  }
+  return false;
+}
+
+function sameOrigin(a: string, b: string): boolean {
+  try {
+    return new URL(a).origin === new URL(b).origin;
+  } catch {
+    return false;
+  }
+}

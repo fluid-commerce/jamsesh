@@ -430,7 +430,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           // A change made for another host (an offline queue replayed after the relay switched hosts) never lands here.
           const meant = req.headers.get("x-jam-host");
           if (meant && MUTATING.has(req.method) && meant !== hostIdOf(hub)) return new Response("That change was made for a different JamSesh host.", { status: 409, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
-          return await idempotent(hub, req, path, () => api(hub, req, url, ip, device, hostWindow, !seesAll));
+          return await idempotent(hub, req, path, hostWindow ? "window" : `device:${(device as { id?: string } | null | undefined)?.id ?? ""}`, () => api(hub, req, url, ip, device, hostWindow, !seesAll));
         }
         // A frame drawn at the size the screen asked for (the stored render is capped at 1600 px): /renders/full/<artifact id>.png?size=2400
         const full = path.match(/^\/renders\/full\/([\w-]+)\.png$/);
@@ -1612,11 +1612,11 @@ function remember(set: Set<string>, key: string, max: number) {
   if (set.size > max) set.delete(set.values().next().value!);
 }
 
-async function idempotent(hub: Hub, req: Request, path: string, run: () => Promise<Response>): Promise<Response> {
+async function idempotent(hub: Hub, req: Request, path: string, scope: string, run: () => Promise<Response>): Promise<Response> {
   const given = req.headers.get("x-jam-idem");
   if (!given || req.method === "GET" || path === "/api/audio" || given.length > 100) return run();
-  // The record belongs to this bearer credential, method and route (a window's rotating cookie is not part of it): the same key sent as someone else, or to another route, is a different call and runs on its own authority.
-  const key = `${new Bun.CryptoHasher("sha256").update(`${req.method}\n${path}\n${req.headers.get("authorization") ?? ""}`).digest("hex").slice(0, 16)}:${given}`;
+  // The record belongs to this paired device (or the host's window), method and route: the same key sent as someone else, or to another route, is a different call and runs on its own authority.
+  const key = `${new Bun.CryptoHasher("sha256").update(`${req.method}\n${path}\n${scope}`).digest("hex").slice(0, 16)}:${given}`;
   const now = Date.now();
   for (const [k, v] of idemSeen) {
     if (now - v.at < IDEM_TTL_MS && idemSeen.size <= 2000) break;

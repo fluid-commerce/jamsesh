@@ -545,3 +545,13 @@ test("a replay key belongs to its caller and route: the same key from someone el
   expect(elsewhere.headers.get("x-jam-idem-replay")).toBeNull(); // another credential: not the first caller's answer
   expect(first.status).toBe(again.status);
 });
+
+test("cookie-authenticated browsers don't share a replay record either", async () => {
+  const a = browser("Lou's laptop");
+  const b = browser("Lou's other laptop");
+  const key = `idem-${Math.random()}`;
+  const send = (token: string) => fetch(`${base}/api/settings`, { method: "POST", headers: { "x-forwarded-for": "9.9.9.9", "x-jam-idem": key, "content-type": "application/json", cookie: `jam_token=${token}` }, body: JSON.stringify({ sessionName: "Lou's room" }) });
+  await send(a.token);
+  expect((await send(a.token)).headers.get("x-jam-idem-replay")).toBe("1");
+  expect((await send(b.token)).headers.get("x-jam-idem-replay")).toBeNull();
+});

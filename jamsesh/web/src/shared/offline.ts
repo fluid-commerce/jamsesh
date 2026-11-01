@@ -72,6 +72,14 @@ async function migrateLegacy(target: IDBDatabase): Promise<void> {
     }
   });
   if (!old) return;
+  const done = (tx: IDBTransaction) =>
+    new Promise<void>((res, rej) => {
+      tx.oncomplete = () => res();
+      tx.onabort = () => rej(tx.error ?? new Error("aborted"));
+      tx.onerror = () => rej(tx.error ?? new Error("failed"));
+    });
+  // What makes a row the same row in both places, so a copy that was made but not yet removed is never copied twice.
+  const identity = (store: string, r: Record<string, unknown>) => (store === "outbox" ? `o:${r.idem}` : `a:${r.deviceId}:${r.t0}:${r.t1}`);
   try {
     const host = currentHostKey();
     for (const store of STORES) {
@@ -79,11 +87,18 @@ async function migrateLegacy(target: IDBDatabase): Promise<void> {
       const rows = (await wrap(old.transaction(store).objectStore(store).getAll())) as (Record<string, unknown> & { seq: number })[];
       const mine = rows.filter((r) => store === "audio" || !r.hostId || r.hostId === host);
       if (!mine.length) continue;
+      const have = new Set(((await wrap(target.transaction(store).objectStore(store).getAll())) as Record<string, unknown>[]).map((r) => identity(store, r)));
+      // All copies in one transaction that must commit before anything is removed from the old database.
+      const copy = target.transaction(store, "readwrite");
       for (const r of mine) {
+        if (have.has(identity(store, r))) continue;
         const { seq: _seq, ...rest } = r;
-        await wrap(target.transaction(store, "readwrite").objectStore(store).add(rest));
+        copy.objectStore(store).add(rest);
       }
-      for (const r of mine) await wrap(old.transaction(store, "readwrite").objectStore(store).delete(r.seq));
+      await done(copy);
+      const drop = old.transaction(store, "readwrite");
+      for (const r of mine) drop.objectStore(store).delete(r.seq);
+      await done(drop);
     }
   } finally {
     old.close();
