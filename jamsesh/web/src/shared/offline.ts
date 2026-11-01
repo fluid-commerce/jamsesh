@@ -410,10 +410,10 @@ export class Outbox {
           const r = await this.d.send(e);
           if (r.kind === "retry") {
             if (r.server && ++e.serverFails >= SERVER_FAIL_LIMIT) {
-              // A call the hub keeps failing on stays saved (its retention is days, not six tries) and is tried again later; the ones behind it go first.
-              skipped.add(e);
-              mismatched = true;
-              continue;
+              // A call the hub keeps failing on stays saved, first in line (its retention is days, not six tries; order is kept), and is tried again with backoff. Only the age cap ends it.
+              e.serverFails = SERVER_FAIL_LIMIT;
+              this.schedule();
+              return;
             }
             this.schedule();
             return;

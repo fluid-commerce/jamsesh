@@ -166,16 +166,21 @@ test("a share registration whose reply was lost is ended afterwards, not left on
   const calls: string[] = [];
   const realFetch = globalThis.fetch;
   const { hub } = await import("../src/shared/hub");
+  let sentId = "";
   globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
     calls.push(`${init.method ?? "GET"} ${url}`);
-    if (init.method === "POST" && url.endsWith("/api/shares")) throw new Error("reply lost"); // the hub got it; the answer never arrived
-    if (url.endsWith("/api/state")) return Response.json({ shares: [{ id: "sh-orphan", deviceId: hub.deviceId, kind: "camera", status: "live" }] });
+    if (init.method === "POST" && url.endsWith("/api/shares")) {
+      sentId = JSON.parse(String(init.body)).shareId; // the hub got it, under the id this window gave; the answer never arrived
+      throw new Error("reply lost");
+    }
+    if (url.endsWith("/api/state")) return Response.json({ shares: [{ id: "sh-orphan", deviceId: hub.deviceId, kind: "camera", status: "live", clientId: sentId }, { id: "sh-other-window", deviceId: hub.deviceId, kind: "camera", status: "live", clientId: "sh-someone-elses" }] });
     return new Response("{}");
   }) as any;
   try {
     const { startShareForTest } = await import("../src/shared/share");
     await expect(startShareForTest("camera")).rejects.toThrow();
     expect(calls).toContain("DELETE /api/shares/sh-orphan");
+    expect(calls).not.toContain("DELETE /api/shares/sh-other-window"); // another window's cast on the same device is not touched
   } finally {
     globalThis.fetch = realFetch;
     Object.defineProperty(globalThis.navigator, "mediaDevices", { value: media, configurable: true });

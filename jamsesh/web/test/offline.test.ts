@@ -275,7 +275,7 @@ describe("outbox host safety", () => {
 });
 
 describe("outbox: a failing call", () => {
-  test("a call the hub keeps answering with 500 stays saved (tried again later) instead of being thrown away after six tries", async () => {
+  test("a call the hub keeps answering with 500 stays saved, first in line, instead of being thrown away after six tries", async () => {
     const sent: string[] = [];
     const { ob } = make(async (e) => (sent.push(e.idem), e.idem === "poison" ? { kind: "retry", server: true } : { kind: "ok" }));
     await ob.enqueue("POST", "/x", { a: 1 }, "poison");
@@ -283,8 +283,8 @@ describe("outbox: a failing call", () => {
     for (let i = 0; i < 10; i++) await ob.kick();
     await settle();
     expect(sent.filter((x) => x === "poison").length).toBeGreaterThanOrEqual(6);
-    expect(sent).toContain("behind"); // the one behind it still goes
-    expect(ob.get().pending).toBe(1); // only the poison one is left, still saved
+    expect(sent).not.toContain("behind"); // order is kept: nothing overtakes it
+    expect(ob.get().pending).toBe(2); // both still saved
     expect(ob.get().dropped).toBe(0);
     ob.stop();
   });

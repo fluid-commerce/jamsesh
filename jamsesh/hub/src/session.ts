@@ -1583,6 +1583,7 @@ export class Session {
       status: "live",
       reason: existing?.reason ?? "",
       startedAt: Date.now(),
+      ...(shareId && !existing && /^[\w-]{1,64}$/.test(shareId) ? { clientId: shareId } : {}),
     };
     this.store.put("shares", share);
     this.store.addEvent({ kind: "system", authorType: "person", authorId: share.personId, authorName: share.personName, text: `${share.personName} is sharing their ${kind}.`, data: { shareId: share.id } });

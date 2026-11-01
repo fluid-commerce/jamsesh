@@ -1121,3 +1121,19 @@ test("a quiet room's HTML frame has any meta refresh removed", async () => {
   expect(quiet.srcDoc).toContain("Content-Security-Policy");
   expect(htmlFrame(false, doc).srcDoc).toContain("Refresh"); // a normal room is left as authored
 });
+
+test("a refresh spelled with character references is still removed from a quiet room's HTML frame", async () => {
+  const { htmlFrame } = await import("../../web/src/shared/sound");
+  for (const tag of [`<meta http-equiv="&#114;efresh" content="0;url=https://example.invalid/">`, `<meta http-equiv="&#x72;e&#102;resh" content="0;url=x">`, `<meta http-equiv=re&Tab;fresh content="0;url=x">`]) {
+    const out = htmlFrame(true, `<html><head>${tag}</head><body>hi</body></html>`).srcDoc;
+    expect([tag, /refresh|&#114|&#x72/i.test(out.replace(/Content-Security-Policy/gi, ""))]).toEqual([tag, false]);
+  }
+});
+
+test("a share started with a client id keeps it, so that window alone can find it again", async () => {
+  const s = new Session(new Store(mkdtempSync(join(dir, "sh-"))));
+  const p = s.upsertPerson({ name: "Ona" });
+  s.touchDevice("dev-1", { personId: p.id, location: "room", micOn: true, pairedId: "host" });
+  const sh = s.startShare("dev-1", "camera", "sh-window-1");
+  expect(sh.clientId).toBe("sh-window-1");
+});

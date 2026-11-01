@@ -313,6 +313,8 @@ export interface Share {
   startedAt: number;
   /** Ended because its window lost the hub (or the hub restarted), not by anyone: only such a share is registered again. */
   lost?: boolean;
+  /** The id the window gave this capture when it started it, so a registration whose reply was lost can still be found and ended by that window alone. */
+  clientId?: string;
 }
 
 /** One curated piece of session knowledge the brain keeps current. */

@@ -71,10 +71,19 @@ hub.subscribe(() => {
  */
 export const QUIET_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data: blob: http: https:; font-src data:; media-src 'none'; script-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'";
 
+/** Character references in a tag, as the browser reads them (&#114; and &#x72; and the few named ones), so a refresh spelled with them is still seen. */
+function decodeEntities(t: string): string {
+  return t
+    .replace(/&#x([0-9a-f]+);?/gi, (_, h) => String.fromCodePoint(Math.min(0x10ffff, parseInt(h, 16) || 0)))
+    .replace(/&#(\d+);?/g, (_, d) => String.fromCodePoint(Math.min(0x10ffff, parseInt(d, 10) || 0)))
+    .replace(/&(tab|newline|nbsp|amp|quot|apos|lt|gt);?/gi, (_, n) => ({ tab: "", newline: "", nbsp: " ", amp: "&", quot: '"', apos: "'", lt: "<", gt: ">" })[n.toLowerCase() as "tab"] ?? "")
+    .replace(/[\t\n\r]/g, "");
+}
+
 export function htmlFrame(silent: boolean, doc: string): { srcDoc: string; sandbox: string } {
   if (!silent) return { srcDoc: doc, sandbox: "allow-scripts" };
   // A meta refresh navigates the frame without a click or a script, to a document that would not carry this policy: it is removed.
-  doc = doc.replace(/<meta\b[^>]*http-equiv\s*=\s*["']?\s*refresh[^>]*>/gi, "");
+  doc = doc.replace(/<meta\b[^>]*>/gi, (tag) => (/http-equiv\s*=\s*["']?\s*refresh/i.test(decodeEntities(tag)) ? "" : tag));
   const meta = `<meta http-equiv="Content-Security-Policy" content="${QUIET_CSP}"><base target="_blank">`;
   const at = doc.search(/<!doctype html>/i);
   const srcDoc = at === 0 ? doc.replace(/^<!doctype html>/i, (m) => m + meta) : meta + doc;

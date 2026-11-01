@@ -129,16 +129,16 @@ async function startShare(kind: Share["kind"], shareId?: string): Promise<Share>
     return share;
   } catch (e) {
     await stopPublishing(pub.shareId, { notifyHub: false });
-    await endStrayShares(kind); // the hub may have registered it though its reply was lost
+    await endStrayShares(kind, pub.shareId); // the hub may have registered it though its reply was lost
     throw e;
   }
 }
 
-/** A share of this kind from this window that the hub lists but nothing here is capturing for (a registration whose reply never arrived): ended. */
-async function endStrayShares(kind: Share["kind"]) {
+/** The share the hub registered for this capture (found by the id this window gave it) though its reply was lost: ended. Nothing else is touched, not even another window's share on the same device. */
+async function endStrayShares(_kind: Share["kind"], clientId: string) {
   try {
     const st = await api<{ shares?: Share[] }>("/state");
-    for (const sh of st.shares ?? []) if (sh.deviceId === hub.deviceId && sh.kind === kind && sh.status === "live" && !localPublication(sh.id)) await api(`/shares/${sh.id}`, undefined, "DELETE").catch(() => {});
+    for (const sh of st.shares ?? []) if (sh.clientId === clientId && (sh.status === "live" || sh.status === "requested")) await api(`/shares/${sh.id}`, undefined, "DELETE").catch(() => {});
   } catch {}
 }
 
