@@ -1554,6 +1554,21 @@ export class Session {
     return share;
   }
 
+  private cancelledAttempts = new Map<string, number>();
+  /** A capture attempt (the id its window gave it) whose window stopped it: a registration still on its way is refused, one already made is ended. */
+  cancelAttempt(clientId: string, caller: string | null) {
+    this.cancelledAttempts.set(clientId, Date.now());
+    for (const [k, at] of this.cancelledAttempts) if (Date.now() - at > 10 * 60_000 || this.cancelledAttempts.size > 500) this.cancelledAttempts.delete(k);
+    for (const sh of this.store.all("shares")) {
+      if (sh.clientId !== clientId || (sh.status !== "live" && sh.status !== "requested")) continue;
+      if (caller && this.store.get("devices", sh.deviceId)?.pairedId !== caller) continue; // only its own window (or the host's) ends it
+      this.endShare(sh.id, "ended");
+    }
+  }
+  attemptCancelled(clientId: string) {
+    return this.cancelledAttempts.has(clientId);
+  }
+
   /** A device starts sharing, on its own or in answer to a request. */
   startShare(deviceId: string, kind: Share["kind"], shareId?: string, label?: string, clientId?: string): Share {
     const device = this.store.get("devices", deviceId);

@@ -136,12 +136,11 @@ async function startShare(kind: Share["kind"], shareId?: string): Promise<Share>
   }
 }
 
-/** The share the hub registered for this capture attempt (found by its id) though the reply was lost: ended. The read is retried, since the cleanup is the only thing standing between a dead tile and the stage. Nothing else is touched, not even another window's share on the same device. */
+/** This capture attempt is over: the hub is told by the attempt's own id, so a registration that arrived (reply lost) is ended and one still on its way is refused. Retried, since it is the only thing between a dead tile and the stage. Nothing else is touched, not even another window's share on the same device. */
 async function endStrayShares(clientId: string) {
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
-      const st = await api<{ shares?: Share[] }>("/state");
-      for (const sh of st.shares ?? []) if (sh.clientId === clientId && (sh.status === "live" || sh.status === "requested")) await api(`/shares/${sh.id}`, undefined, "DELETE").catch(() => {});
+      await api(`/shares/${clientId}`, undefined, "DELETE", { queue: false }); // never parked in the outbox: it has to reach the hub now
       return;
     } catch {
       await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));

@@ -574,3 +574,21 @@ test("a change made in another session (a fresh room on the same host) is refuse
   expect(await old.text()).toContain("different JamSesh session");
   expect((await send(hub.session.roomId())).status).toBe(200);
 });
+
+test("when the record of a reply can't be written, the change is not run a second time by the retry", async () => {
+  const mine = hub.auth.issue({ kind: "browser", label: "Sam's laptop", ip: "10.0.0.43" });
+  const real = hub.session.store.saveReply.bind(hub.session.store);
+  (hub.session.store as any).saveReply = () => {
+    throw new Error("disk full");
+  };
+  try {
+    const key = `idem-${Math.random()}`;
+    const send = () => fetch(`${base}/api/settings`, { method: "POST", headers: { "x-forwarded-for": "9.9.9.9", authorization: `Bearer ${mine.token}`, "content-type": "application/json", "x-jam-idem": key }, body: JSON.stringify({ sessionName: "Sam's room" }) });
+    const first = await send();
+    expect(first.status).toBe(200);
+    const again = await send();
+    expect(again.headers.get("x-jam-idem-replay")).toBe("1"); // answered from memory, not run again
+  } finally {
+    (hub.session.store as any).saveReply = real;
+  }
+});

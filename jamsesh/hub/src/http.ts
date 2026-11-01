@@ -1368,6 +1368,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     // A share someone ended stays ended: its window re-registering it (after missing the end) is told so and stops.
     const was = typeof body.shareId === "string" ? s.store.get("shares", body.shareId) : undefined;
     if (was && was.deviceId === String(body.deviceId) && (was.status === "ended" || was.status === "declined") && !was.lost) return bad("That share was ended.", 409);
+    // A capture attempt its window already gave up on (stopped before its registration arrived) is not started.
+    if (typeof body.clientId === "string" && s.attemptCancelled(body.clientId)) return bad("That share was stopped before it started.", 409);
     const share = s.startShare(String(body.deviceId), body.kind === "camera" ? "camera" : "screen", typeof body.shareId === "string" ? body.shareId : undefined, body.label, typeof body.clientId === "string" ? body.clientId : undefined);
     s.placeShare(share);
     return json(share);
@@ -1379,6 +1381,12 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     return share ? json(share) : bad(`${p.name} has no JamSesh window open.`, 409);
   }
   m = path.match(/^\/shares\/([\w-]+)(\/decline)?$/);
+  if (m && req.method === "DELETE" && !m[2] && m[1].startsWith("cap-")) {
+    // A capture attempt's own id: its window stopped it. A registration that arrives later is refused, and one already made is ended.
+    if (!caller) return notAPerson()!;
+    s.cancelAttempt(m[1], hostWindow ? null : caller);
+    return json({ ok: true });
+  }
   if (m && (req.method === "DELETE" || (req.method === "POST" && m[2]))) {
     const sh = s.store.get("shares", m[1]);
     if (!sh) return json({ ok: true }); // already gone: a repeated call
@@ -1653,7 +1661,22 @@ async function idempotent(hub: Hub, req: Request, path: string, scope: string, r
     const reply = { status: res.status, body, type: res.headers.get("content-type") ?? "application/json" };
     // Nor is a body that didn't arrive whole (408): nothing ran, so the same key sent again whole must run.
     if (res.status >= 500 || res.status === 408) idemSeen.delete(key);
-    else hub.session.store.saveReply(key, reply);
+    else {
+      try {
+        hub.session.store.saveReply(key, reply);
+      } catch (e) {
+        // The change was made; only the note of its answer failed. The answer stays in memory (a retry gets it, not a second run) and the write is tried again.
+        console.error("replay record:", e instanceof Error ? e.message : e);
+        const again = (left: number) => {
+          try {
+            hub.session.store.saveReply(key, reply);
+          } catch {
+            if (left > 0) setTimeout(() => again(left - 1), 2000).unref?.();
+          }
+        };
+        setTimeout(() => again(5), 2000).unref?.();
+      }
+    }
     settle(reply);
     return res;
   } catch (e) {

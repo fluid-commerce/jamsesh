@@ -159,42 +159,40 @@ test("stopping a share while the hub is still registering it ends the share the 
   }
 });
 
-test("a share registration whose reply was lost is ended afterwards, not left on the stage with nothing streaming", async () => {
+test("a share registration whose reply was lost is cancelled by its attempt's own id, so it is ended whether or not it has arrived", async () => {
   const fake = fakeStream();
   const media = (globalThis.navigator as any).mediaDevices;
   Object.defineProperty(globalThis.navigator, "mediaDevices", { value: { getUserMedia: async () => fake.stream, getDisplayMedia: async () => fake.stream }, configurable: true });
   const calls: string[] = [];
   const realFetch = globalThis.fetch;
-  const { hub } = await import("../src/shared/hub");
   let sentId = "";
   globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
     calls.push(`${init.method ?? "GET"} ${url}`);
     if (init.method === "POST" && url.endsWith("/api/shares")) {
-      sentId = JSON.parse(String(init.body)).clientId; // the hub got it, under this attempt's own id; the answer never arrived
+      sentId = JSON.parse(String(init.body)).clientId; // the hub got it (or will), under this attempt's own id; the answer never arrived
       throw new Error("reply lost");
     }
-    if (url.endsWith("/api/state")) return Response.json({ shares: [{ id: "sh-orphan", deviceId: hub.deviceId, kind: "camera", status: "live", clientId: sentId }, { id: "sh-other-window", deviceId: hub.deviceId, kind: "camera", status: "live", clientId: "sh-someone-elses" }] });
     return new Response("{}");
   }) as any;
   try {
     const { startShareForTest } = await import("../src/shared/share");
     await expect(startShareForTest("camera")).rejects.toThrow();
-    expect(calls).toContain("DELETE /api/shares/sh-orphan");
-    expect(calls).not.toContain("DELETE /api/shares/sh-other-window"); // another window's cast on the same device is not touched
+    expect(sentId.startsWith("cap-")).toBe(true);
+    expect(calls).toContain(`DELETE /api/shares/${sentId}`);
   } finally {
     globalThis.fetch = realFetch;
     Object.defineProperty(globalThis.navigator, "mediaDevices", { value: media, configurable: true });
   }
 });
 
-test("a lost reply for an ACCEPTED request is cleaned up too, and a failed first read of the state is retried", async () => {
+test("the cancel for an accepted request's attempt is retried when it fails", async () => {
   const fake = fakeStream();
   const media = (globalThis.navigator as any).mediaDevices;
   Object.defineProperty(globalThis.navigator, "mediaDevices", { value: { getUserMedia: async () => fake.stream, getDisplayMedia: async () => fake.stream }, configurable: true });
   const calls: string[] = [];
   const realFetch = globalThis.fetch;
   let sentId = "";
-  let stateReads = 0;
+  let cancels = 0;
   globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
     calls.push(`${init.method ?? "GET"} ${url}`);
     if (init.method === "POST" && url.endsWith("/api/shares")) {
@@ -203,17 +201,14 @@ test("a lost reply for an ACCEPTED request is cleaned up too, and a failed first
       sentId = b.clientId;
       throw new Error("reply lost");
     }
-    if (url.endsWith("/api/state")) {
-      if (++stateReads === 1) throw new Error("state read failed");
-      return Response.json({ shares: [{ id: "sh-request", deviceId: "d", kind: "camera", status: "live", clientId: sentId }] });
-    }
+    if (init.method === "DELETE" && url.includes("/api/shares/cap-") && ++cancels === 1) throw new Error("first cancel lost");
     return new Response("{}");
   }) as any;
   try {
     const { startShareForTest } = await import("../src/shared/share");
     await expect(startShareForTest("camera", "sh-request")).rejects.toThrow();
-    expect(stateReads).toBe(2);
-    expect(calls).toContain("DELETE /api/shares/sh-request");
+    expect(cancels).toBe(2);
+    expect(calls).toContain(`DELETE /api/shares/${sentId}`);
   } finally {
     globalThis.fetch = realFetch;
     Object.defineProperty(globalThis.navigator, "mediaDevices", { value: media, configurable: true });

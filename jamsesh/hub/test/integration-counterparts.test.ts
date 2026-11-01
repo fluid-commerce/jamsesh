@@ -1141,3 +1141,23 @@ test("a share keeps the id of the capture attempt that registered it, for a new 
   expect(accepted.id).toBe(asked!.id);
   expect(accepted.clientId).toBe("cap-2");
 });
+
+test("a capture attempt cancelled before its registration arrives is refused, and one already registered is ended; another device's attempt is untouched", async () => {
+  const s = new Session(new Store(mkdtempSync(join(dir, "sh-"))));
+  const p = s.upsertPerson({ name: "Ona" });
+  s.touchDevice("dev-1", { personId: p.id, location: "room", micOn: true, pairedId: "pair-1" });
+  s.touchDevice("dev-2", { personId: p.id, location: "room", micOn: true, pairedId: "pair-2" });
+  // Registered first, cancelled after: ended.
+  const made = s.startShare("dev-1", "screen", undefined, undefined, "cap-a");
+  const other = s.startShare("dev-2", "camera", undefined, undefined, "cap-b");
+  s.cancelAttempt("cap-a", "pair-1");
+  expect(s.store.get("shares", made.id)!.status).toBe("ended");
+  expect(s.store.get("shares", other.id)!.status).toBe("live");
+  // Another window can't end it by guessing its id.
+  s.cancelAttempt("cap-b", "pair-1");
+  expect(s.store.get("shares", other.id)!.status).toBe("live");
+  // Cancelled before it arrived: refused when it does.
+  s.cancelAttempt("cap-late", "pair-1");
+  expect(s.attemptCancelled("cap-late")).toBe(true);
+  expect(s.attemptCancelled("cap-b")).toBe(true); // recorded either way; only a registration under that id is refused
+});
