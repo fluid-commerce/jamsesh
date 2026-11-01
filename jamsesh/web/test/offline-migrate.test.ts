@@ -135,3 +135,21 @@ test("a write is reported saved only when its transaction commits: an abort righ
   const rows = await idbTable<any>("audio").all();
   expect(rows.some((r) => r.t0 === 9)).toBe(false); // nothing half-written reached the database
 });
+
+test("speech captured for another host is not moved into this host's database", async () => {
+  const { idbTable, resetDbHandle } = await import("../src/shared/offline");
+  const legacy = await new Promise<IDBDatabase>((res) => {
+    const req = indexedDB.open("jamsesh-offline", 1);
+    req.onupgradeneeded = () => {
+      for (const s of ["outbox", "audio"]) if (!req.result.objectStoreNames.contains(s)) req.result.createObjectStore(s, { keyPath: "seq", autoIncrement: true });
+    };
+    req.onsuccess = () => res(req.result);
+  });
+  await put(legacy, "audio", { deviceId: "d", t0: 77, t1: 78, level: 1, noise: 0, wav: new ArrayBuffer(44), hostId: "host-other" });
+  await put(legacy, "audio", { deviceId: "d", t0: 79, t1: 80, level: 1, noise: 0, wav: new ArrayBuffer(44), hostId: "host-1" });
+  legacy.close();
+  resetDbHandle();
+  const rows = await idbTable<any>("audio").all();
+  expect(rows.some((r) => r.t0 === 77)).toBe(false);
+  expect(rows.some((r) => r.t0 === 79)).toBe(true);
+});

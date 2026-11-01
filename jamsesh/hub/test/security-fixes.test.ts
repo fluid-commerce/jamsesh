@@ -122,7 +122,6 @@ test("an agent can't clear a person's voiceprint", async () => {
  */
 const AGENT_MAY = [
   // Reads that answer any method the same way.
-  "ANY /api/canvas-link",
   "ANY /api/clock",
   "ANY /api/engines",
   "ANY /api/me",
@@ -230,4 +229,14 @@ test("canvas_render counts as a look only when a picture came back", async () =>
     canvas.call = call;
     canvas.renderNode = renderNode;
   }
+});
+
+test("the canvas link (it carries the canvas token) is for a paired person or the host's window, not an agent or a bare local process", async () => {
+  const person = hub.auth.issue({ kind: "browser", label: "Laptop", ip: "10.0.0.8", personId: chey.id });
+  const get = (h: Record<string, string>) => fetch(`${base}/api/canvas-link?kind=edit`, { headers: h });
+  expect((await get({ ...remote, authorization: `Bearer ${agent.token}` })).status).toBe(403);
+  expect((await get({})).status).toBe(403);
+  expect((await get({ ...remote, authorization: `Bearer ${person.token}` })).status).toBe(200);
+  expect((await get(hostWindow())).status).toBe(200);
+  expect((await fetch(`${base}/api/canvas-link?kind=edit`, { method: "POST", headers: { ...remote, authorization: `Bearer ${person.token}` } })).status).toBeGreaterThanOrEqual(400);
 });

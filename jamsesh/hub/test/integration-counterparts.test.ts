@@ -940,3 +940,37 @@ test("the canvas edit and view credentials are not in the state every client rec
   expect(s.state().session.canvas.status).toBe("live");
   expect(s.canvas.wsEdit).toContain("EDIT"); // the hub keeps them for /canvas-link
 });
+
+test("a speech segment whose acknowledgement was lost is not taken in twice after a hub restart", async () => {
+  process.env.JAMSESH_SILENT = "1";
+  const { Hub } = await import("../src/hub");
+  const { startHttp } = await import("../src/http");
+  const data = join(dir, "audio-restart");
+  const upload = async (hub: InstanceType<typeof Hub>, server: ReturnType<typeof startHttp>) => {
+    const wav = new Uint8Array(44 + 3200);
+    return fetch(`http://127.0.0.1:${server.port}/api/audio?deviceId=dv1&t0=1000&t1=1100&level=-20&noise=-60&epoch=-1`, { method: "POST", headers: { "content-type": "audio/wav", cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` }, body: wav });
+  };
+  const run = async () => {
+    const hub = new Hub({ canvas: false, whisper: false, dataDir: data, teamDir: join(dir, "team-ar") });
+    const server = startHttp(hub, 0);
+    const person = hub.session.upsertPerson({ name: "Ro" });
+    hub.session.touchDevice("dv1", { personId: person.id, location: "room", micOn: true, pairedId: "host" });
+    return { hub, server };
+  };
+  const a = await run();
+  let ingested = 0;
+  (a.hub.audio as any).ingest = async () => (ingested++, { id: "seg1" });
+  expect((await upload(a.hub, a.server)).status).toBe(200);
+  a.server.stop(true);
+  a.hub.devproxy.stop();
+  a.hub.stop();
+  const b = await run();
+  let again = 0;
+  (b.hub.audio as any).ingest = async () => (again++, { id: "seg1" });
+  const r = await upload(b.hub, b.server);
+  expect(((await r.json()) as any).duplicate).toBe(true);
+  expect([ingested, again]).toEqual([1, 0]);
+  b.server.stop(true);
+  b.hub.devproxy.stop();
+  b.hub.stop();
+});

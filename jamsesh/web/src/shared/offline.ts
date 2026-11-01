@@ -85,7 +85,7 @@ async function migrateLegacy(target: IDBDatabase): Promise<void> {
     for (const store of STORES) {
       if (!old.objectStoreNames.contains(store)) continue;
       const rows = (await wrap(old.transaction(store).objectStore(store).getAll())) as (Record<string, unknown> & { seq: number })[];
-      const mine = rows.filter((r) => store === "audio" || !r.hostId || r.hostId === host);
+      const mine = rows.filter((r) => !r.hostId || r.hostId === host); // queued calls and speech alike: only what was made for this host (or before any was known)
       if (!mine.length) continue;
       const have = new Set(((await wrap(target.transaction(store).objectStore(store).getAll())) as Record<string, unknown>[]).map((r) => identity(store, r)));
       // All copies in one transaction that must commit before anything is removed from the old database.

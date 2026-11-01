@@ -878,7 +878,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     if (!caller || dev.pairedId !== caller) return bad("That device belongs to another window.", 403);
     // A timed-out upload is retried; the same segment from the same device only counts once.
     const segKey = `${deviceId}:${q.get("t0")}`;
-    if (recentSegments.has(segKey)) return json({ ok: true, duplicate: true, lag: Math.round(hub.audio.deviceLag(deviceId)) });
+    // Remembered across a restart too (the reply that never reached the sender is retried by it).
+    if (recentSegments.has(segKey) || s.store.reply(`audio:${segKey}`)) return json({ ok: true, duplicate: true, lag: Math.round(hub.audio.deviceLag(deviceId)) });
     // The same segment still being taken in: not "received" yet, so the sender keeps its copy and asks again.
     if (segmentsInFlight.has(segKey)) return new Response(JSON.stringify({ error: "That recording is still being taken in. Try again." }), { status: 503, headers: { "content-type": "application/json", "retry-after": "2" } });
     // Only a segment that was ingested counts as received: a failed or cut-off upload is retried.
@@ -896,6 +897,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
         epoch: q.has("epoch") ? Number(q.get("epoch")) : -1,
       });
       remember(recentSegments, segKey, 4000);
+      s.store.saveReply(`audio:${segKey}`, { status: 200, type: "application/json", body: JSON.stringify({ ok: true, segment: seg.id }) });
       return json({ ok: true, segment: seg.id, lag: Math.round(hub.audio.deviceLag(deviceId)) });
     } catch (e) {
       if (e instanceof BadWav) return bad(e.message);
@@ -1337,6 +1339,10 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
   if (path === "/engines") return json({ transcription: hub.transcriber.engineList(), whisperModel: hub.transcriber.whisper.status(), speechModel: hub.transcriber.parakeet.status(), vocabulary: hub.transcriber.vocabulary().map((v) => v.term), voiceprints: s.voiceprints(), problem: hub.transcriber.problem() });
 
   if (path === "/canvas-link") {
+    // The address carries the canvas token: for a paired person or the host's window, never an agent or an unauthenticated caller on this computer.
+    if (req.method !== "GET") return bad("not found", 404);
+    const refused = notAPerson();
+    if (refused) return refused;
     const kind = url.searchParams.get("kind") === "view" ? "view" : "edit";
     // Through the hub's relay at the address this person used (LAN, remote, HTTPS), so the
     // canvas server itself never has to be reachable from outside this machine.
