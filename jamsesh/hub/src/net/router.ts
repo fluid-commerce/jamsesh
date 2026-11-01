@@ -316,6 +316,8 @@ export class PortMapper {
         const r = await pmpMap(c.gateway, c.internalPort, c.externalPort, LEASE);
         if (!r.supported || r.result !== 0) problem = "The router didn't confirm renewing the port forward.";
         else if (r.externalPort !== c.externalPort) {
+          // A delete already under way (turning off, reconfiguring) removes it by the internal port: this must not wait on that delete, which waits on this.
+          if (!this.current || this.unmapping) return;
           // The router moved it: the public link would point at the wrong port, so that forward is taken back and the loss is reported.
           this.current = { ...c, externalPort: r.externalPort };
           await this.unmap(true);

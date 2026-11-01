@@ -809,3 +809,57 @@ test("a NAT-PMP renewal answered with a different port takes that forward back a
     sock.close();
   }
 });
+
+test("a delete started while a NAT-PMP renewal is waiting on a moved-port reply: both finish and the forward is deleted", async () => {
+  const dgram = await import("node:dgram");
+  const { PortMapper } = await import("../src/net/router");
+  const sock = dgram.createSocket("udp4");
+  const lifetimes: number[] = [];
+  let held: (() => void) | undefined;
+  sock.on("message", (msg, rinfo) => {
+    const op = msg[1];
+    if (op === 0) {
+      const r = Buffer.alloc(12);
+      r.writeUInt8(128, 1);
+      Buffer.from([203, 0, 113, 7]).copy(r, 8);
+      sock.send(r, rinfo.port, rinfo.address);
+    } else if (op === 2) {
+      const life = msg.readUInt32BE(8);
+      lifetimes.push(life);
+      const r = Buffer.alloc(16);
+      r.writeUInt8(130, 1);
+      r.writeUInt16BE(msg.readUInt16BE(4), 8);
+      r.writeUInt16BE(life === 0 ? msg.readUInt16BE(6) : 50443, 10);
+      r.writeUInt32BE(life, 12);
+      const send = () => sock.send(r, rinfo.port, rinfo.address);
+      if (life === 0) send();
+      else held = send; // the renewal's reply is held until the delete has started
+    }
+  });
+  try {
+    await new Promise<void>((res, rej) => {
+      sock.once("error", rej);
+      sock.bind(5351, "127.0.0.1", () => res());
+    });
+  } catch {
+    sock.close();
+    return;
+  }
+  try {
+    const m: any = new PortMapper();
+    m.current = { gateway: "127.0.0.1", method: "nat-pmp", internalPort: 4443, externalPort: 443, lanIp: "10.0.0.2" };
+    const renewal = m.renew();
+    await Bun.sleep(100);
+    const gone = m.unmap();
+    await Bun.sleep(50);
+    held?.();
+    const done = Promise.all([renewal, gone]);
+    const out = await Promise.race([done, Bun.sleep(4000).then(() => "hung")]);
+    expect(out).not.toBe("hung");
+    expect((out as any)[1]).toBe(true);
+    expect(lifetimes).toContain(0);
+    expect(m.current).toBeUndefined();
+  } finally {
+    sock.close();
+  }
+});
