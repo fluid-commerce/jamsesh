@@ -930,3 +930,13 @@ test("a big-screen web tile for this computer or a private network must be a reg
   for (const u of ["http://localhost:3000", "http://127.0.0.1:1", "http://172.16.0.5/x", "http://172.31.255.1", "http://192.168.1.2", "http://10.1.2.3", "http://[::1]:3000", "http://[fd00::1]", "http://[fe80::1]", "http://[::ffff:192.168.1.1]", "http://0.0.0.0", "http://169.254.169.254", "http://100.64.0.1", "http://printer.local", "http://localhost.", "http://2130706433/"]) expect([u, isLocalUrl(u)]).toEqual([u, true]);
   for (const u of ["https://example.com", "https://8.8.8.8", "http://172.32.0.1", "http://172.15.0.1", "https://[2001:db8::1]/"]) expect([u, isLocalUrl(u)]).toEqual([u, false]);
 });
+
+test("the canvas edit and view credentials are not in the state every client receives", async () => {
+  const s = new Session(new Store(mkdtempSync(join(dir, "sc-"))));
+  s.setCanvas({ status: "live", editLink: "figcraft://join?host=h&file=a&token=EDIT", viewLink: "figcraft://join?host=h&file=a&token=VIEW", wsEdit: "ws://h/?file=a&token=EDIT", wsView: "ws://h/?file=a&token=VIEW", reason: null });
+  const shown = JSON.stringify(s.state());
+  expect(shown).not.toContain("EDIT");
+  expect(shown).not.toContain("VIEW");
+  expect(s.state().session.canvas.status).toBe("live");
+  expect(s.canvas.wsEdit).toContain("EDIT"); // the hub keeps them for /canvas-link
+});

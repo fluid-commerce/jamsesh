@@ -2,7 +2,7 @@
 // every change after it. Components read it through useHub().
 import { useSyncExternalStore } from "react";
 import { currentHostKey, isHostConfirmed, readDeviceId, readPref, writePref } from "./identity";
-import { markContact, onContact, outbox, uuid } from "./offline";
+import { hostVerified, markContact, onContact, outbox, uuid } from "./offline";
 import type { BusMessage, HubState, JamEvent, Stage, Utterance } from "../../../hub/src/types";
 
 export type { HubState, JamEvent, Stage, Utterance };
@@ -473,6 +473,11 @@ async function send<T>(path: string, body: unknown, m: string, opts: ApiOptions,
   if (queueable && (outbox.get().pending > 0 || navigator.onLine === false)) return save();
   if (navigator.onLine === false) throw new OfflineError();
 
+  // A host id that came from this browser's memory (the hub didn't answer at boot) is not yet the host being reached: nothing is sent as it until the hub names it.
+  if (mutating && currentHostKey() && !isHostConfirmed() && !(await hostVerified())) {
+    if (queueable) return save();
+    throw new OfflineError();
+  }
   // A direct send is saved first and removed once the hub has answered, so a window closed mid-request loses nothing.
   const held = queueable ? await outbox.hold(m, path, body, idem as string).catch(() => undefined) : undefined;
   try {
@@ -511,7 +516,14 @@ async function sendNow<T>(path: string, body: unknown, m: string, opts: ApiOptio
     if (queueable) return save(); // keep the work; it sends once this laptop is paired again
     throw new Error("This laptop isn't connected to the session.");
   }
-  const text = await res.text().catch(() => "");
+  // An answer that didn't arrive whole is an unknown outcome, not an empty success: it is sent again with the same key.
+  let text: string;
+  try {
+    text = await res.text();
+  } catch {
+    if (queueable) return save();
+    throw new OfflineError("The answer didn't arrive whole.");
+  }
   const json = (() => {
     try {
       return JSON.parse(text);

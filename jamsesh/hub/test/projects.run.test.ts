@@ -136,8 +136,8 @@ test("shutdown says whether the final save finished: a save that hangs or fails 
   expect(secondDone).toBe(false);
   finish(false);
   expect([await first, await second, runs]).toEqual([false, false, 1]);
-  // The budget the app's wait is built on: its steps add up to 25 seconds.
-  expect(budget.snapshot + budget.thumbnail + budget.network + budget.work).toBe(25_000);
+  // The budget the app's wait is built on: its steps add up to 34 seconds (the app waits 45).
+  expect(budget.snapshot + budget.thumbnail + budget.network + budget.work).toBe(34_000);
 });
 
 function readdirOnly(dir: string) {

@@ -2250,7 +2250,9 @@ channel and MCP can slide a panel too (it does nothing on a canvas without the b
 
 The host runs `figcraft-server` on `127.0.0.1:47900` (or the next free port) and a headless host
 participant named after the brain that publishes the session's file. People reach the canvas
-through the hub's relay (`/collab`).
+through the hub's relay (`/collab`). The canvas protocol authenticates a WebSocket by a token in its address (a browser
+cannot set a header on one), so `GET /api/canvas-link` returns an edit or view address with that token, to a paired
+person only; the tokens are not in the state every client receives, and they are the accepted cost of the protocol.
 
 ### 12.2 Agents on the canvas
 

@@ -48,3 +48,11 @@ test("a host-switch 409 on a direct call queues it for its own host instead of l
     outbox.stop();
   }
 });
+
+test("a page whose host id is only remembered sends nothing as that host: the edit is queued, and the page reloads when the relay reaches another host", async () => {
+  const p = Bun.spawn(["bun", "run", `${import.meta.dir}/fixtures/unconfirmed-host.ts`], { stdout: "pipe", stderr: "pipe" });
+  const out = await new Response(p.stdout).text();
+  await p.exited;
+  const last = out.trim().split("\n").at(-1) ?? "";
+  expect(JSON.parse(last)).toEqual({ queued: true, sentToHub: [], reloads: 1 });
+});

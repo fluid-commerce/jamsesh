@@ -290,7 +290,7 @@ export class Hub {
   }
 
   /** How long each step of `shutdown` may take. The Mac app waits longer than their sum (host.rs `SHUTDOWN_WAIT`) before killing. */
-  static SHUTDOWN_MS = { snapshot: 8000, thumbnail: 4000, network: 3000, work: 10000 };
+  static SHUTDOWN_MS = { snapshot: 8000, thumbnail: 4000, network: 12000, work: 10000 };
 
   /**
    * Stops, saving a final snapshot first when there is a canvas to save. Resolves with whether every step

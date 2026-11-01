@@ -6,6 +6,7 @@
 // this device; the hub uses that to tell who is talking.
 import { useSyncExternalStore } from "react";
 import { hub, pref } from "./hub";
+import { currentHostKey } from "./identity";
 import { backoffMs, createStore, idbTable, markContact } from "./offline";
 
 const RATE = 16000;
@@ -60,6 +61,8 @@ export const AUDIO_MAX_SEGMENTS = 60;
 
 export interface AudioSeg {
   seq?: number;
+  /** The host this was captured for; it is only ever sent to that host. */
+  hostId?: string;
   deviceId: string;
   t0: number;
   t1: number;
@@ -126,6 +129,7 @@ export class AudioBuffer {
   private chain: Promise<unknown> = Promise.resolve();
 
   private async submitOne(seg: AudioSeg) {
+    seg.hostId ??= currentHostKey();
     await this.load();
     const direct = !this.rows.length && !this.draining && this.canSend();
     // Saved before it is sent: if the window closes while the upload is out, the segment is still here next time.
@@ -211,13 +215,15 @@ async function postSegment(s: AudioSeg): Promise<PostResult> {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 20_000);
   try {
-    const res = await fetch(`/api/audio?${q}`, { method: "POST", credentials: "same-origin", signal: ctl.signal, headers: { "content-type": "audio/wav" }, body: s.wav });
+    const res = await fetch(`/api/audio?${q}`, { method: "POST", credentials: "same-origin", signal: ctl.signal, headers: { "content-type": "audio/wav", ...(s.hostId ? { "x-jam-host": s.hostId } : {}) }, body: s.wav });
     markContact();
     if (res.ok) return "ok";
     if (res.status === 401) {
       hub.markUnauthorized();
       return "unauthorized";
     }
+    // 409: the relay now reaches another host than this was captured for; it stays here for its own host.
+    if (res.status === 409) return "retry";
     // 404: this window's device isn't registered with the host yet (it is a moment after joining).
     return res.status >= 500 || res.status === 404 || res.status === 408 || res.status === 429 ? "retry" : "drop";
   } catch {

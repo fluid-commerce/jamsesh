@@ -92,3 +92,32 @@ test("two speech segments reach the hub oldest first even when the first upload 
   await Promise.all([buf.submit(seg(1)), buf.submit(seg(2))]);
   expect(done).toEqual([1, 2]);
 });
+
+test("an answer that breaks off while it is being read is an unknown outcome: the held copy becomes a queued retry with the same key", async () => {
+  await (outbox as any).d.table.clear();
+  (outbox as any).entries = [];
+  (outbox as any).publish();
+  const keys: string[] = [];
+  globalThis.fetch = (async (_u: string, init: any) => {
+    keys.push(init.headers["x-jam-idem"]);
+    return { ok: true, status: 200, text: async () => Promise.reject(new Error("reset")), headers: new Headers() } as any;
+  }) as any;
+  const r: any = await api("/tasks/d", { n: 1 }, "PATCH");
+  expect(r.queued).toBe(true);
+  expect(r.idem).toBe(keys[0]);
+  outbox.stop();
+});
+
+test("a speech segment carries the host it was captured for, and one refused by another host stays buffered", async () => {
+  const { AudioBuffer } = await import("../src/shared/mic");
+  const rows = new Map<number, any>();
+  let n = 0;
+  const table: any = { all: async () => [...rows.values()], add: async (r: any) => (rows.set(++n, r), n), delete: async (k: number) => void rows.delete(k) };
+  const seen: (string | undefined)[] = [];
+  const post = async (s: any) => (seen.push(s.hostId), "retry" as const);
+  const buf = new AudioBuffer(table, post, () => true);
+  await buf.submit({ deviceId: "d", t0: 1, t1: 2, level: 1, noise: 0, wav: new ArrayBuffer(44), hostId: "hostA" });
+  expect(seen[0]).toBe("hostA");
+  expect(rows.size).toBe(1); // refused for now: kept
+  buf.kick();
+});

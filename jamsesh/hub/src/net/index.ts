@@ -138,7 +138,6 @@ export class Network {
   async stop(): Promise<boolean> {
     const dnsDone = this.stopUpdater?.();
     this.stopUpdater = undefined;
-    await dnsDone; // an update already on its way to DuckDNS finishes before this reports off
     if (this.renewTimer) clearInterval(this.renewTimer);
     this.renewTimer = undefined;
     if (this.certRetry) clearTimeout(this.certRetry);
@@ -152,6 +151,8 @@ export class Network {
       return gone;
     } finally {
       this.stopping = false;
+      // The router is asked at once; an update already on its way to DuckDNS finishes before this reports off (both waits overlap).
+      await dnsDone;
     }
   }
 

@@ -278,7 +278,7 @@ export class Session {
 
   state(): HubState {
     return {
-      session: { roomId: this.roomId(), name: this.settings().sessionName, code: this.code, silent: silent(), startedAt: this.startedAt, hubUrl: this.hubUrl, canvas: this.canvas, addresses: this.addresses() },
+      session: { roomId: this.roomId(), name: this.settings().sessionName, code: this.code, silent: silent(), startedAt: this.startedAt, hubUrl: this.hubUrl, canvas: { ...this.canvas, editLink: null, viewLink: null, wsEdit: null, wsView: null }, addresses: this.addresses() },
       settings: this.settings(),
       people: this.people(),
       devices: this.store.all("devices"),

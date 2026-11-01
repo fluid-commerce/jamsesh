@@ -151,8 +151,15 @@ export function idbTable<T extends object>(store: (typeof STORES)[number]): Tabl
       const db = await openDb();
       if (db) {
         try {
-          const key = await wrap(db.transaction(store, "readwrite").objectStore(store).add({ ...v }));
-          return Number(key);
+          // Done only when the transaction has committed, not when the request merely succeeded: what a caller was told is saved survives a later abort.
+          const tx = db.transaction(store, "readwrite");
+          const req = tx.objectStore(store).add({ ...v });
+          await new Promise<void>((res, rej) => {
+            tx.oncomplete = () => res();
+            tx.onabort = () => rej(tx.error ?? new Error("aborted"));
+            tx.onerror = () => rej(tx.error ?? new Error("failed"));
+          });
+          return Number(req.result);
         } catch {}
       }
       const seq = ++memSeq + 1e9; // keep memory keys apart from persisted ones
@@ -477,10 +484,24 @@ export async function hostVerified(): Promise<boolean> {
   if (isHostConfirmed()) return true;
   try {
     const r = await fetch("/api/pair/info", { signal: AbortSignal.timeout(2500) });
-    return confirmHostKey(String((await r.json()).hostId ?? ""));
+    const id = String((await r.json()).hostId ?? "");
+    const ok = confirmHostKey(id);
+    // The relay now reaches another host than this page was loaded for: reload once so the identity and the records follow the host.
+    if (!ok && id && currentHostKey() && id !== currentHostKey()) reloadForNewHost();
+    return ok;
   } catch {
     return false;
   }
+}
+
+function reloadForNewHost() {
+  try {
+    const key = "jamsesh.hostReload";
+    const last = Number(sessionStorage.getItem(key) ?? 0);
+    if (Date.now() - last < 15_000 || typeof location === "undefined" || typeof location.reload !== "function") return;
+    sessionStorage.setItem(key, String(Date.now()));
+    location.reload();
+  } catch {}
 }
 
 export const outbox = new Outbox({ table: idbTable<OutboxEntry>("outbox"), send: sendEntry, hostId: currentHostKey, canSend: hostVerified });
