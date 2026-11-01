@@ -72,6 +72,35 @@ pub fn runtime(resources: Option<&Path>) -> Result<Runtime, String> {
     checkout().map(|(repo, bun)| Runtime::Checkout { repo, bun })
 }
 
+/// The agent setup script and the hook it installs, as files on this Mac. In the app they are in its resources; in a checkout
+/// they are written (from the checkout's own source) to a private temporary folder. Never fetched from a session host.
+pub fn agent_setup_files(runtime: &Result<Runtime, String>) -> Result<(PathBuf, PathBuf), String> {
+    match runtime {
+        Ok(Runtime::Bundled { resources, .. }) => {
+            let (s, h) = (resources.join("agent-setup.sh"), resources.join("agent-hook.sh"));
+            if s.is_file() && h.is_file() {
+                Ok((s, h))
+            } else {
+                Err("This copy of JamSesh is missing its agent setup. Reinstall the app.".into())
+            }
+        }
+        Ok(Runtime::Checkout { repo, bun }) => {
+            let dir = std::env::temp_dir().join(format!("jamsesh-agent-setup-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            let status = std::process::Command::new(bun)
+                .arg(repo.join("jamsesh/hub/src/emit-setup.ts"))
+                .arg(&dir)
+                .status()
+                .map_err(|e| e.to_string())?;
+            if !status.success() {
+                return Err("Couldn't prepare the agent setup from the JamSesh checkout.".into());
+            }
+            Ok((dir.join("agent-setup.sh"), dir.join("agent-hook.sh")))
+        }
+        Err(e) => Err(e.clone()),
+    }
+}
+
 /// The JamSesh checkout that holds the hub: `$JAMSESH_REPO`, the one this app was built from, or ~/jamsesh.
 fn checkout() -> Result<(PathBuf, PathBuf), String> {
     let candidates =
@@ -243,6 +272,23 @@ fn stop_child(mut child: Child, wait: Duration) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_agent_setup_is_a_file_from_the_app_never_fetched_from_a_host() {
+        let dir = std::env::temp_dir().join(format!("jamsesh-setup-files-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let rt = |res: &std::path::Path| Ok(Runtime::Bundled { hub: res.join("hub/jamsesh-hub"), resources: res.to_path_buf() });
+        // Missing files: refused, with nothing fetched in their place.
+        assert!(agent_setup_files(&rt(&dir)).is_err());
+        std::fs::write(dir.join("agent-setup.sh"), "#!/usr/bin/env bash\n").unwrap();
+        std::fs::write(dir.join("agent-hook.sh"), "#!/usr/bin/env bash\n").unwrap();
+        let (s, h) = agent_setup_files(&rt(&dir)).unwrap();
+        assert_eq!((s, h), (dir.join("agent-setup.sh"), dir.join("agent-hook.sh")));
+        // And the app's own code no longer asks a host for a script to run.
+        let main = include_str!("main.rs");
+        assert!(!main.contains("/agent/setup.sh"), "main.rs must not fetch the setup script from a host");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn sh(script: &str) -> Child {
         let child = Command::new("/bin/sh").args(["-c", script]).spawn().unwrap();

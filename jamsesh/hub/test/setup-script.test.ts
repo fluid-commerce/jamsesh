@@ -80,9 +80,18 @@ exit 0
   chmodSync(path, 0o755);
 }
 
+/** JAMSESH_TEST_BUNDLED=1 runs the whole suite against the script that ships in the Mac app (written by emit-setup.ts, host details passed as environment data, no token, the bundled hook). */
+const BUNDLED = process.env.JAMSESH_TEST_BUNDLED === "1";
+let bundledDir = "";
 async function run(box: ReturnType<typeof sandbox>, name = "Felipe", extra: Record<string, string> = {}) {
-  const proc = Bun.spawn(["/bin/bash", "-c", joinScript({} as Hub, origin, "tok")], {
-    env: { HOME: box.home, PATH: `${box.bin}:/usr/bin:/bin`, JAMSESH_NAME: name, JAMSESH_CLI_DIRS: box.bin, ...extra },
+  if (BUNDLED && !bundledDir) {
+    bundledDir = mkdtempSync(join(tmpdir(), "jamsesh-emit-"));
+    const emit = Bun.spawnSync(["bun", `${import.meta.dir}/../src/emit-setup.ts`, bundledDir]);
+    expect(emit.exitCode).toBe(0);
+  }
+  const argv = BUNDLED ? ["/bin/bash", join(bundledDir, "agent-setup.sh")] : ["/bin/bash", "-c", joinScript({} as Hub, origin, "tok")];
+  const proc = Bun.spawn(argv, {
+    env: { HOME: box.home, PATH: `${box.bin}:/usr/bin:/bin`, JAMSESH_NAME: name, JAMSESH_CLI_DIRS: box.bin, ...(BUNDLED ? { JAMSESH_HUB: origin, JAMSESH_HOOK_FILE: join(bundledDir, "agent-hook.sh") } : {}), ...extra },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -91,7 +100,7 @@ async function run(box: ReturnType<typeof sandbox>, name = "Felipe", extra: Reco
 }
 
 describe("agent setup script", () => {
-  test("keeps other settings and replaces earlier JamSesh hooks", async () => {
+  test.skipIf(BUNDLED)("keeps other settings and replaces earlier JamSesh hooks", async () => {
     const box = sandbox();
     stubCli(join(box.bin, "claude"), box.log);
     const settings = join(box.home, ".claude/settings.json");
@@ -195,7 +204,7 @@ describe("agent setup script", () => {
     }
   });
 
-  test("the credential travels in headers read from files, never in a command line", async () => {
+  test.skipIf(BUNDLED)("the credential travels in headers read from files, never in a command line", async () => {
     const box = sandbox();
     stubCli(join(box.bin, "claude"), box.log);
     auths.length = 0;
@@ -285,7 +294,7 @@ describe("agent setup script", () => {
     }
   });
 
-  test("Codex: replaces its earlier JamSesh server, and leaves its old instructions block for the person to delete", async () => {
+  test.skipIf(BUNDLED)("Codex: replaces its earlier JamSesh server, and leaves its old instructions block for the person to delete", async () => {
     const box = sandbox();
     mkdirSync(join(box.home, ".codex"), { recursive: true });
     const config = join(box.home, ".codex/config.toml");
@@ -334,7 +343,7 @@ describe("agent setup script", () => {
     expect(readFileSync(target, "utf8")).toContain(`url = "${origin}/mcp"`);
   });
 
-  test("reinstalling never widens a file's mode, and tightens JamSesh's own credential files", async () => {
+  test.skipIf(BUNDLED)("reinstalling never widens a file's mode, and tightens JamSesh's own credential files", async () => {
     const box = sandbox();
     stubCli(join(box.bin, "claude"), box.log);
     mkdirSync(join(box.home, ".codex"), { recursive: true });
@@ -573,7 +582,7 @@ describe("agent setup script", () => {
     expect(JSON.parse(readFileSync(settings, "utf8")).hooks).toEqual(hooks);
   });
 
-  test("a hook download that fails or comes back broken leaves the installed hook as it was", async () => {
+  test.skipIf(BUNDLED)("a hook download that fails or comes back broken leaves the installed hook as it was", async () => {
     const box = sandbox();
     stubCli(join(box.bin, "claude"), box.log);
     expect((await run(box)).code).toBe(0);
@@ -659,7 +668,7 @@ describe("agent setup script", () => {
     expect(readdirSync(dir).filter((f) => f.startsWith(".saved") || f.endsWith(".restore"))).toEqual([]);
   };
 
-  test("a failed hook download leaves auth.header, client.env and hook.sh as they were", async () => {
+  test.skipIf(BUNDLED)("a failed hook download leaves auth.header, client.env and hook.sh as they were", async () => {
     const box = sandbox();
     stubCli(join(box.bin, "claude"), box.log);
     const { dir, files } = earlierInstall(box);
@@ -1172,7 +1181,7 @@ describe("agent setup script", () => {
     expect((await run(box)).code).toBe(0);
   });
 
-  test("a lock file left by a run that died holds nothing, and a failed setup releases its lock too", async () => {
+  test.skipIf(BUNDLED)("a lock file left by a run that died holds nothing, and a failed setup releases its lock too", async () => {
     const box = sandbox();
     stubCli(join(box.bin, "claude"), box.log);
     const dir = join(box.home, ".jamsesh");
@@ -1205,4 +1214,69 @@ describe("agent setup script", () => {
       expect(existsSync(`${box.log}.overlap`)).toBe(false);
     }
   }, 240_000);
+});
+
+
+// The copy that ships in the Mac app: no host details in its text, no token, and nothing fetched from a host is run.
+describe("the bundled agent setup", () => {
+  async function emitted() {
+    const dir = mkdtempSync(join(tmpdir(), "jamsesh-emit2-"));
+    expect(Bun.spawnSync(["bun", `${import.meta.dir}/../src/emit-setup.ts`, dir]).exitCode).toBe(0);
+    return { dir, setup: join(dir, "agent-setup.sh"), hook: join(dir, "agent-hook.sh") };
+  }
+  const runBundled = async (box: ReturnType<typeof sandbox>, files: { setup: string; hook: string }, env: Record<string, string>) => {
+    const proc = Bun.spawn(["/bin/bash", files.setup], { env: { HOME: box.home, PATH: `${box.bin}:/usr/bin:/bin`, JAMSESH_NAME: "Felipe", JAMSESH_CLI_DIRS: box.bin, ...env }, stdout: "pipe", stderr: "pipe" });
+    const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+    return { stdout, stderr, code };
+  };
+
+  test("the script text carries no host, relay or token; those arrive as data in the environment", async () => {
+    const f = await emitted();
+    const text = readFileSync(f.setup, "utf8");
+    expect(text).not.toMatch(/127\.0\.0\.1:\d{2,5}/);
+    expect(text).not.toContain("Bearer tok");
+    expect(text).toContain("${JAMSESH_HUB:-}");
+    expect(text).not.toMatch(/fetch hook\.sh/); // the hook is copied from the bundle
+  });
+
+  test("it installs the bundled hook, sends no credential, and asks the host for no script", async () => {
+    const f = await emitted();
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    auths.length = 0;
+    const seen: string[] = [];
+    const was = hookBody;
+    hookBody = "#!/usr/bin/env bash\necho FROM-THE-HOST\n"; // what a host would hand out: must never be installed
+    try {
+      const r = await runBundled(box, f, { JAMSESH_HUB: origin, JAMSESH_HOOK_FILE: f.hook });
+      expect(r.code).toBe(0);
+      expect(readFileSync(join(box.home, ".jamsesh/hook.sh"), "utf8")).toBe(readFileSync(f.hook, "utf8"));
+      expect(readFileSync(join(box.home, ".jamsesh/hook.sh"), "utf8")).not.toContain("FROM-THE-HOST");
+      expect(auths.every((a) => a.replace(/^Bearer\s*/i, "") === "")).toBe(true); // no token went to the relay: it adds the credential
+      void seen;
+    } finally {
+      hookBody = was;
+    }
+  });
+
+  test("it refuses a relay that isn't this Mac, and a missing hook file, before changing anything", async () => {
+    const f = await emitted();
+    for (const env of <Record<string, string>[]>[{ JAMSESH_HUB: "https://evil.example", JAMSESH_HOOK_FILE: f.hook }, { JAMSESH_HUB: "http://127.0.0.1.evil.example:80", JAMSESH_HOOK_FILE: f.hook }, { JAMSESH_HUB: origin, JAMSESH_HOOK_FILE: join(f.dir, "nope") }, { JAMSESH_HOOK_FILE: f.hook }]) {
+      const box = sandbox();
+      stubCli(join(box.bin, "claude"), box.log);
+      const r = await runBundled(box, f, env);
+      expect([JSON.stringify(env), r.code]).toEqual([JSON.stringify(env), 1]);
+      expect(existsSync(join(box.home, ".jamsesh/hook.sh"))).toBe(false);
+    }
+  });
+
+  test("a broken bundled hook stops setup and changes nothing", async () => {
+    const f = await emitted();
+    writeFileSync(f.hook, "not a script\n");
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    const r = await runBundled(box, f, { JAMSESH_HUB: origin, JAMSESH_HOOK_FILE: f.hook });
+    expect(r.code).not.toBe(0);
+    expect(existsSync(join(box.home, ".jamsesh/hook.sh"))).toBe(false);
+  });
 });

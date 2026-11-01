@@ -615,30 +615,28 @@ async fn set_up_agents(app: &AppHandle, state: &App) -> Result<String, String> {
     let (_, me) = proxy::get(port, "/api/me").await?;
     let me: serde_json::Value = serde_json::from_str(&me).unwrap_or_default();
     let name = me.pointer("/person/name").and_then(|v| v.as_str()).map(str::to_string).unwrap_or_default();
-    let (status, script) = proxy::get(port, &format!("/agent/setup.sh?relay={port}")).await?;
-    if !status.is_success() || !script.starts_with("#!") {
-        return Err("The host didn't hand out the setup. Connect this Mac again with a fresh code.".into());
-    }
+    // The setup and the hook it installs are files that ship with the app (or, in a checkout, are written by it from the same source):
+    // nothing fetched from the session host is ever run. What differs per session (the relay on this Mac) goes in as data, in the environment.
+    let resources = app.path().resource_dir().ok().map(|r| r.join("jamsesh"));
+    let runtime = host::runtime(resources.as_deref());
+    let (script, hook) = host::agent_setup_files(&runtime)?;
     let mut cmd = tokio::process::Command::new("/bin/bash");
-    cmd.arg("-s")
+    cmd.arg(&script)
         .env("PATH", host::path_env())
         .env("JAMSESH_NAME", &name)
-        .stdin(std::process::Stdio::piped())
+        .env("JAMSESH_HUB", format!("http://127.0.0.1:{port}"))
+        .env("JAMSESH_HOOK_FILE", &hook)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     // The setup checks Codex's TOML config with Bun's parser. The app's own hub is a Bun executable (it
     // runs as Bun itself when told to), so a Mac without Bun installed still has one.
-    let resources = app.path().resource_dir().ok().map(|r| r.join("jamsesh"));
-    match host::runtime(resources.as_deref()) {
+    match &runtime {
         Ok(host::Runtime::Bundled { hub, .. }) => cmd.env("JAMSESH_BUN", hub),
         Ok(host::Runtime::Checkout { bun, .. }) => cmd.env("JAMSESH_BUN", bun),
         Err(_) => &mut cmd,
     };
-    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        stdin.write_all(script.as_bytes()).await.map_err(|e| e.to_string())?;
-    }
+    let child = cmd.spawn().map_err(|e| e.to_string())?;
     let out = child.wait_with_output().await.map_err(|e| e.to_string())?;
     let _ = app;
     if out.status.success() {

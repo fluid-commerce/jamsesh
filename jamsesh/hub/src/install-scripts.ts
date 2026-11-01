@@ -288,16 +288,29 @@ If the command fails because the host is unreachable, say so; don't retry in a l
 /** A value as one single-quoted shell word: nothing in it is expanded or run. */
 export const shellWord = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
 
-export function joinScript(hub: Hub, origin?: string, token = "") {
-  const HUB = origin ?? hub.session.hubUrl;
+/**
+ * The setup script. `bundled`: the copy that ships inside the Mac app. It carries no host details at all: the relay address
+ * arrives as JAMSESH_HUB (an environment variable, read as data, and only ever the app's own relay on 127.0.0.1), there is no
+ * token (the relay adds it), and the hook it installs is the bundled file named by JAMSESH_HOOK_FILE, never one fetched from a host.
+ */
+export function joinScript(hub: Hub | null, origin?: string, token = "", bundled = false) {
+  const HUB = origin ?? hub?.session.hubUrl ?? "";
   return `#!/usr/bin/env bash
 # JamSesh: set up this computer's agents for a JamSesh host (run by the agent after pairing).
 set -euo pipefail
 # Everything runs inside main, read in full before it starts: piped into bash, a command that
 # reads standard input (claude mcp does) would otherwise swallow the rest of this script.
 main() {
-HUB=${shellWord(HUB)}
-TOKEN=${shellWord(token)}
+${
+  bundled
+    ? `HUB="\${JAMSESH_HUB:-}"
+case "$HUB" in http://127.0.0.1:[0-9]*) ;; *) echo "ERROR: Setup is run by the JamSesh app, which names its relay on this Mac." >&2; exit 1 ;; esac
+TOKEN=""
+HOOK_FILE="\${JAMSESH_HOOK_FILE:-}"
+[ -f "$HOOK_FILE" ] || { echo "ERROR: The JamSesh app's hook file is missing; reinstall the app." >&2; exit 1; }`
+    : `HUB=${shellWord(HUB)}
+TOKEN=${shellWord(token)}`
+}
 # Where a write to this path really lands, as a clean absolute path: a symlink is followed (one that leads
 # nowhere too, however many links and ".." it goes through), so the link itself stays a link.
 resolve() { perl -MCwd=abs_path -MFile::Basename=dirname,basename -e 'my $p = shift; my $r = abs_path($p); if (!defined $r && -l $p) { my ($t, $n) = ($p, 0); while (-l $t && $n++ < 20) { my $l = readlink $t; $l = dirname($t) . "/" . $l unless $l =~ m{^/}; my $d = abs_path(dirname($l)); $t = (defined $d ? $d : dirname($l)) . "/" . basename($l) } my @o; for my $s (split m{/+}, $t) { next if $s eq "" || $s eq "."; if ($s eq "..") { pop @o } else { push @o, $s } } $r = "/" . join("/", @o) } print $r // $p' "$1"; }
@@ -533,7 +546,7 @@ if [ -z "$NAME" ] && [ -f "$DIR/client.env" ]; then NAME="$(conf JAMSESH_NAME)";
 # The hook is fetched to a private temporary file and checked before it replaces the installed one, so
 # a download cut short never leaves Claude Code's hooks running half a script.
 hooktmp="$SAVED/hook.sh.new"
-if fetch hook.sh "$hooktmp" && head -n 1 "$hooktmp" | grep -q '^#!/usr/bin/env bash' && bash -n "$hooktmp"; then
+if ${bundled ? 'cp "$HOOK_FILE" "$hooktmp"' : 'fetch hook.sh "$hooktmp"'} && head -n 1 "$hooktmp" | grep -q '^#!/usr/bin/env bash' && bash -n "$hooktmp"; then
   safe_write "$DIR/hook.sh" 755 < "$hooktmp"
 else
   reason=hook

@@ -15,6 +15,8 @@ swiftc -O -swift-version 5 hub/native/jamsesh-pdftext.swift -o "$OUT/hub/jamsesh
 (cd web && bunx vite build >/dev/null) && cp -R web/dist "$OUT/web"
 cp -R "$JAM/web-canvas" "$OUT/canvas"
 cp skill/SKILL.md "$OUT/skill/"
+# What "Connect my agents" runs: written here from the same source as the hub, so the app never runs script text fetched from a host.
+bun hub/src/emit-setup.ts "$OUT"
 # whisper.cpp's server (MIT, see NOTICE). The shipped binary is always built here, from the pinned
 # commit, straight into the bundle: a stamp beside a binary can be written by anyone, so no binary
 # found on this machine is bundled on the strength of one.
