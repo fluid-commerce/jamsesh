@@ -2420,6 +2420,8 @@ export class Session {
     const { lock: _drop, pinnedById: _pin, ...rest } = cur;
     // The lock goes together with the questions about it: all of it, or none.
     this.atomically(() => this.commitStage({ ...rest, pinned: false }, screen));
+    // The screen is free: a share waiting for one goes up (after this call returns: lockOf() reads through here).
+    if (this.awaitingScreen.size) queueMicrotask(() => this.retryPendingShares());
   }
 
   /** A person's yes to the lock question counts this long after it was asked. */

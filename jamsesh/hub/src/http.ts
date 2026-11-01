@@ -1665,7 +1665,15 @@ async function idempotent(hub: Hub, req: Request, path: string, scope: string, r
     if (res.status >= 500 || res.status === 408) idemSeen.delete(key);
     else {
       try {
-        hub.session.store.saveReply(key, reply);
+        // Too big to keep in the database: held in memory (pinned, a few at most) so the retry of a lost reply still gets it, not a second run.
+        if (!hub.session.store.saveReply(key, reply)) {
+          unsavedReplies.add(key);
+          while (unsavedReplies.size > 100) {
+            const old = unsavedReplies.values().next().value!;
+            unsavedReplies.delete(old);
+            idemSeen.delete(old);
+          }
+        }
       } catch (e) {
         // The change was made; only the note of its answer failed. The answer stays in memory (a retry gets it, not a second run) and the write is tried again.
         console.error("replay record:", e instanceof Error ? e.message : e);
