@@ -592,3 +592,31 @@ test("when the record of a reply can't be written, the change is not run a secon
     (hub.session.store as any).saveReply = real;
   }
 });
+
+test("a reply whose record can't be written is written again when storage recovers, long after the first retries", async () => {
+  const mine = hub.auth.issue({ kind: "browser", label: "Tia's laptop", ip: "10.0.0.44" });
+  const real = hub.session.store.saveReply.bind(hub.session.store);
+  let broken = true;
+  (hub.session.store as any).saveReply = (...a: [string, any]) => {
+    if (broken) throw new Error("disk full");
+    return real(...a);
+  };
+  const key = `idem-${Math.random()}`;
+  try {
+    const r = await fetch(`${base}/api/settings`, { method: "POST", headers: { "x-forwarded-for": "9.9.9.9", authorization: `Bearer ${mine.token}`, "content-type": "application/json", "x-jam-idem": key }, body: JSON.stringify({ sessionName: "Tia's room" }) });
+    expect(r.status).toBe(200);
+    broken = false; // storage recovers
+    await Bun.sleep(2600);
+    expect(hub.session.store.reply(`${"x"}`)).toBeNull();
+    const saved = (hub.session.store.db.query("SELECT COUNT(*) AS n FROM replies WHERE key LIKE ?").get(`%:${key}`) as { n: number }).n;
+    expect(saved).toBe(1);
+  } finally {
+    (hub.session.store as any).saveReply = real;
+  }
+});
+
+test("targets that isn't a list is a 400, not a crash", async () => {
+  const mine = hub.auth.issue({ kind: "browser", label: "Uma's laptop", ip: "10.0.0.45" });
+  const r = await call(mine.token, "POST", "/directives", { text: "do it", targets: "agent_1" });
+  expect(r.status).toBe(400);
+});

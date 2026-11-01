@@ -1554,10 +1554,10 @@ export class Session {
     return share;
   }
 
-  private cancelledAttempts = new Map<string, number>();
+  private cancelledAttempts = new Map<string, number>(); // key: caller|attempt id
   /** A capture attempt (the id its window gave it) whose window stopped it: a registration still on its way is refused, one already made is ended. */
   cancelAttempt(clientId: string, caller: string | null) {
-    this.cancelledAttempts.set(clientId, Date.now());
+    this.cancelledAttempts.set(`${caller ?? "host"}|${clientId}`, Date.now());
     for (const [k, at] of this.cancelledAttempts) if (Date.now() - at > 10 * 60_000 || this.cancelledAttempts.size > 500) this.cancelledAttempts.delete(k);
     for (const sh of this.store.all("shares")) {
       if (sh.clientId !== clientId || (sh.status !== "live" && sh.status !== "requested")) continue;
@@ -1565,8 +1565,9 @@ export class Session {
       this.endShare(sh.id, "ended");
     }
   }
-  attemptCancelled(clientId: string) {
-    return this.cancelledAttempts.has(clientId);
+  /** Whether this caller's attempt was cancelled: another window's cancellation of an id it saw does not stop the owner. (The host's window cancels for itself only.) */
+  attemptCancelled(clientId: string, caller: string | null) {
+    return this.cancelledAttempts.has(`${caller ?? "host"}|${clientId}`);
   }
 
   /** A device starts sharing, on its own or in answer to a request. */
@@ -2012,6 +2013,11 @@ export class Session {
     if (idsChanged) this.dropDeadExpanded();
     bus.changed("screens");
     if (idsChanged) bus.changed("stageTiles");
+    // A window came back while a share was waiting for a screen: it is put up now (its own placement deadline still runs).
+    if (idsChanged && live.some((x) => !before.has(x.id))) {
+      const shown = this.shownShareIds();
+      for (const sh of this.shares()) if (sh.status === "live" && !shown.has(sh.id) && !this.sharesShown.has(sh.id) && Date.now() - sh.startedAt < Session.SHARE_PLACE_MS) this.placeShare(sh);
+    }
   }
 
   /** A big-screen window closed (the host app says so): it stops being a place to show things now,

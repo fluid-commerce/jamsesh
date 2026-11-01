@@ -1177,6 +1177,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
   }
 
   if (path === "/directives" && req.method === "POST") {
+    if (body?.targets !== undefined && !Array.isArray(body.targets)) return bad("targets is a list of agent ids");
     const targets = (body?.targets ?? []).filter((t: string) => s.agent(t));
     if (!body?.text?.trim() || !targets.length) return bad("text and at least one agent id in targets are required");
     if ((body?.targets ?? []).length !== targets.length) return bad("One of those agents is no longer in the session.", 409);
@@ -1369,7 +1370,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     const was = typeof body.shareId === "string" ? s.store.get("shares", body.shareId) : undefined;
     if (was && was.deviceId === String(body.deviceId) && (was.status === "ended" || was.status === "declined") && !was.lost) return bad("That share was ended.", 409);
     // A capture attempt its window already gave up on (stopped before its registration arrived) is not started.
-    if (typeof body.clientId === "string" && s.attemptCancelled(body.clientId)) return bad("That share was stopped before it started.", 409);
+    if (typeof body.clientId === "string" && s.attemptCancelled(body.clientId, hostWindow ? null : caller)) return bad("That share was stopped before it started.", 409);
     const share = s.startShare(String(body.deviceId), body.kind === "camera" ? "camera" : "screen", typeof body.shareId === "string" ? body.shareId : undefined, body.label, typeof body.clientId === "string" ? body.clientId : undefined);
     s.placeShare(share);
     return json(share);
@@ -1625,6 +1626,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
 // including calls whose response was lost on the way back. A repeated key gets the first
 // answer again instead of running twice; one that arrives mid-flight waits for the first.
 const IDEM_TTL_MS = 24 * 60 * 60_000;
+const unsavedReplies = new Set<string>();
 const idemSeen = new Map<string, { at: number; done: Promise<{ status: number; body: string; type: string }> }>();
 const recentSegments = new Set<string>();
 const segmentsInFlight = new Set<string>();
@@ -1642,7 +1644,7 @@ async function idempotent(hub: Hub, req: Request, path: string, scope: string, r
   const now = Date.now();
   for (const [k, v] of idemSeen) {
     if (now - v.at < IDEM_TTL_MS && idemSeen.size <= 2000) break;
-    idemSeen.delete(k);
+    if (!unsavedReplies.has(k)) idemSeen.delete(k); // an answer whose record couldn't be written stays
   }
   // Answered before a restart: replay it from the database.
   const saved = idemSeen.has(key) ? null : hub.session.store.reply(key);
@@ -1667,14 +1669,16 @@ async function idempotent(hub: Hub, req: Request, path: string, scope: string, r
       } catch (e) {
         // The change was made; only the note of its answer failed. The answer stays in memory (a retry gets it, not a second run) and the write is tried again.
         console.error("replay record:", e instanceof Error ? e.message : e);
-        const again = (left: number) => {
+        unsavedReplies.add(key); // pinned in memory until the write succeeds: the retry of a lost reply is answered, not run again
+        const again = () => {
           try {
             hub.session.store.saveReply(key, reply);
+            unsavedReplies.delete(key);
           } catch {
-            if (left > 0) setTimeout(() => again(left - 1), 2000).unref?.();
+            setTimeout(again, 2000).unref?.();
           }
         };
-        setTimeout(() => again(5), 2000).unref?.();
+        setTimeout(again, 2000).unref?.();
       }
     }
     settle(reply);

@@ -1158,6 +1158,23 @@ test("a capture attempt cancelled before its registration arrives is refused, an
   expect(s.store.get("shares", other.id)!.status).toBe("live");
   // Cancelled before it arrived: refused when it does.
   s.cancelAttempt("cap-late", "pair-1");
-  expect(s.attemptCancelled("cap-late")).toBe(true);
-  expect(s.attemptCancelled("cap-b")).toBe(true); // recorded either way; only a registration under that id is refused
+  expect(s.attemptCancelled("cap-late", "pair-1")).toBe(true);
+  // Another window cancelling an id it saw does not stop the owner's own registration.
+  expect(s.attemptCancelled("cap-late", "pair-2")).toBe(false);
+  expect(s.attemptCancelled("cap-b", "pair-2")).toBe(false);
+});
+
+test("a share started while no big screen window was open is put up when one comes back", async () => {
+  const s = new Session(new Store(mkdtempSync(join(dir, "sh-"))));
+  const p = s.upsertPerson({ name: "Ona" });
+  s.touchDevice("dev-1", { personId: p.id, location: "room", micOn: true, pairedId: "pair-1" });
+  const info = { width: 1920, height: 1080, dpr: 1, screenX: 0, screenY: 0, at: Date.now() };
+  s.reportScreen("main", info);
+  s.removeScreen("main"); // the window closed
+  const sh = s.startShare("dev-1", "screen", undefined, undefined, "cap-z");
+  s.placeShare(sh); // no window to put it on
+  expect(JSON.stringify(s.stage("main"))).not.toContain(sh.id);
+  s.reportScreen("main", { ...info, at: Date.now() }); // the window is back
+  await Bun.sleep(30);
+  expect(JSON.stringify(s.stage("main"))).toContain(sh.id);
 });
