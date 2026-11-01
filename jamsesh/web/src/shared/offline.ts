@@ -247,7 +247,6 @@ export interface OutboxSnapshot {
 
 export const OUTBOX_MAX_ITEMS = 500;
 export const OUTBOX_MAX_AGE_MS = 7 * 24 * 3600 * 1000;
-const SERVER_FAIL_LIMIT = 6;
 
 /** Exponential backoff with jitter: ~0.5-1 s, 1-2 s, 2-4 s … capped at 30 s. */
 export function backoffMs(attempt: number, rand: () => number = Math.random, capMs = 30_000) {
@@ -409,12 +408,6 @@ export class Outbox {
           }
           const r = await this.d.send(e);
           if (r.kind === "retry") {
-            if (r.server && ++e.serverFails >= SERVER_FAIL_LIMIT) {
-              // A call the hub keeps failing on stays saved, first in line (its retention is days, not six tries; order is kept), and is tried again with backoff. Only the age cap ends it.
-              e.serverFails = SERVER_FAIL_LIMIT;
-              this.schedule();
-              return;
-            }
             this.schedule();
             return;
           }

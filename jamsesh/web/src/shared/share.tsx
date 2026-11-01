@@ -136,16 +136,32 @@ async function startShare(kind: Share["kind"], shareId?: string): Promise<Share>
   }
 }
 
-/** This capture attempt is over: the hub is told by the attempt's own id, so a registration that arrived (reply lost) is ended and one still on its way is refused. Retried, since it is the only thing between a dead tile and the stage. Nothing else is touched, not even another window's share on the same device. */
-async function endStrayShares(clientId: string) {
-  for (let attempt = 0; attempt < 4; attempt++) {
-    try {
-      await api(`/shares/${clientId}`, undefined, "DELETE", { queue: false }); // never parked in the outbox: it has to reach the hub now
-      return;
-    } catch {
-      await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
-    }
+/** Capture attempts whose cancel the hub has not acknowledged yet: tried again when the connection comes back, and every 15 s, until it does. */
+const unacknowledgedCancels = new Set<string>();
+let cancelRetry: ReturnType<typeof setInterval> | null = null;
+async function sendCancel(clientId: string): Promise<boolean> {
+  try {
+    await api(`/shares/${clientId}`, undefined, "DELETE", { queue: false }); // never parked in the outbox: it has to reach the hub now
+    unacknowledgedCancels.delete(clientId);
+    return true;
+  } catch {
+    return false;
   }
+}
+function retryCancels() {
+  for (const id of [...unacknowledgedCancels]) void sendCancel(id);
+  if (!unacknowledgedCancels.size && cancelRetry) (clearInterval(cancelRetry), (cancelRetry = null));
+}
+hub.onReconnect(retryCancels);
+
+/** This capture attempt is over: the hub is told by the attempt's own id, so a registration that arrived (reply lost) is ended and one still on its way is refused. A few quick tries, then it is kept and retried on reconnection and on a timer until acknowledged. Nothing else is touched, not even another window's share on the same device. */
+async function endStrayShares(clientId: string) {
+  unacknowledgedCancels.add(clientId);
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (await sendCancel(clientId)) return;
+    await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+  }
+  cancelRetry ??= setInterval(retryCancels, 15_000);
 }
 
 /** For tests. */

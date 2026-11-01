@@ -1253,3 +1253,28 @@ test("a share put on a cold-start main that never reports goes to the extra scre
   await Bun.sleep(30);
   expect(JSON.stringify(s.stage("screen-2"))).toContain(sh.id);
 });
+
+test("after a comment command whose reply was lost, the retry looks for the comment first and does not add a second", async () => {
+  process.env.JAMSESH_SILENT = "1";
+  const { Hub } = await import("../src/hub");
+  const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "canvas-comments-3"), teamDir: join(dir, "team-cc3") });
+  try {
+    clearInterval((hub.brain as any).digestTimer);
+    const pin = hub.session.addAnnotation({ personId: null, authorName: "Mo", target: { kind: "canvas", ref: "F", label: "F", canvasX: 1, canvasY: 2 }, x: 0.1, y: 0.1, text: "tighten this", source: "pin" } as any);
+    let adds = 0;
+    let appliedButReplyLost = false;
+    (hub.canvas as any).comment = async () => {
+      adds++;
+      appliedButReplyLost = true; // FigCraft applied it...
+      throw new Error("timed out waiting for the reply"); // ...but the reply never came
+    };
+    (hub.canvas as any).hasComment = async () => appliedButReplyLost;
+    expect(await hub.deliverComment(pin.id)).toBe(false);
+    expect(await hub.deliverComment(pin.id)).toBe(true); // found, so marked done without adding again
+    expect(adds).toBe(1);
+    expect(hub.session.store.get("annotations", pin.id)!.commentDone).toBe(true);
+  } finally {
+    hub.devproxy.stop();
+    hub.stop();
+  }
+});

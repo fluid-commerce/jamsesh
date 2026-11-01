@@ -205,3 +205,15 @@ test("a segment whose adjusted copy can't be saved isn't sent, and keeps its sav
   expect([saved.t0, saved.unsynced]).toEqual([1000, true]); // the original, untouched
   (hub as any).set({ clockOffset: 0 });
 });
+
+test("a direct edit the hub answers with 500 is kept and retried with its own key, not lost", async () => {
+  await (outbox as any).d.table.clear();
+  (outbox as any).entries = [];
+  (outbox as any).publish();
+  const keys: string[] = [];
+  globalThis.fetch = (async (_u: string, init: any) => (keys.push(init.headers["x-jam-idem"]), new Response("boom", { status: 500 }))) as any;
+  const r: any = await api("/tasks/f", { n: 1 }, "PATCH");
+  expect(r.queued).toBe(true);
+  expect(r.idem).toBe(keys[0]);
+  outbox.stop();
+});

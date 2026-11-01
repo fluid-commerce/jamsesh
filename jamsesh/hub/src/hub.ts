@@ -351,6 +351,7 @@ export class Hub {
   private commentsRunning = false;
   /** Gives a canvas pin to FigCraft as a comment; it is marked done only once FigCraft has confirmed it, so a failed or unavailable canvas is retried (see flushComments). */
   private commentsOut = new Map<string, Promise<boolean>>();
+  private commentUncertain = new Set<string>();
   deliverComment(id: string): Promise<boolean> {
     // One delivery per pin at a time: an immediate one, the timer's, and a recording's retry share the same command.
     let run = this.commentsOut.get(id);
@@ -361,9 +362,19 @@ export class Hub {
     const a = this.session.store.get("annotations", id);
     if (!a || a.commentDone || a.target.kind !== "canvas" || a.target.canvasX == null) return true;
     try {
+      // After an attempt whose outcome is unknown (the command may have been applied, its reply lost): look first, so a retry doesn't add a second comment.
+      if (this.commentUncertain.has(id)) {
+        if (await this.canvas.hasComment(a).catch(() => false)) {
+          this.commentUncertain.delete(id);
+          this.session.store.patch("annotations", id, { commentDone: true });
+          return true;
+        }
+      }
       if (!(await this.canvas.comment(a))) return false;
+      this.commentUncertain.delete(id);
     } catch (e) {
       console.error("canvas comment:", e instanceof Error ? e.message : e);
+      this.commentUncertain.add(id);
       return false;
     }
     this.session.store.patch("annotations", id, { commentDone: true });

@@ -642,6 +642,15 @@ export class Canvas {
     return true;
   }
 
+  /** Whether FigCraft already has this pin's comment (a command whose reply was lost may have been applied): looked for by its text and author. Errs toward "yes" only when both are found. */
+  async hasComment(a: import("../types").Annotation): Promise<boolean> {
+    if (!this.host) return false;
+    const text = `${a.text || "📍"}`;
+    const listed = await this.host.command("comment.list", { query: text });
+    const shown = typeof listed === "string" ? listed : JSON.stringify(listed ?? "");
+    return shown.includes(text) && shown.includes(a.authorName);
+  }
+
   /** Leaves and rejoins the session file, for when the host's copy fell behind. */
   async resync(why: string) {
     const link = this.session.canvas.editLink;

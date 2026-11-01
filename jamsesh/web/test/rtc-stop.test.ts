@@ -214,3 +214,37 @@ test("the cancel for an accepted request's attempt is retried when it fails", as
     Object.defineProperty(globalThis.navigator, "mediaDevices", { value: media, configurable: true });
   }
 });
+
+test("a cancel the hub never acknowledged is sent again when the connection comes back", async () => {
+  const fake = fakeStream();
+  const media = (globalThis.navigator as any).mediaDevices;
+  Object.defineProperty(globalThis.navigator, "mediaDevices", { value: { getUserMedia: async () => fake.stream, getDisplayMedia: async () => fake.stream }, configurable: true });
+  const realFetch = globalThis.fetch;
+  const { hub } = await import("../src/shared/hub");
+  let cancels = 0;
+  let acknowledge = false;
+  globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
+    if (init.method === "POST" && url.endsWith("/api/shares")) throw new Error("reply lost");
+    if (init.method === "DELETE" && url.includes("/api/shares/cap-")) {
+      cancels++;
+      if (!acknowledge) throw new Error("down");
+    }
+    return new Response("{}");
+  }) as any;
+  try {
+    const { startShareForTest } = await import("../src/shared/share");
+    await expect(startShareForTest("camera")).rejects.toThrow();
+    const afterQuickTries = cancels;
+    expect(afterQuickTries).toBe(4); // a few quick tries, all lost
+    acknowledge = true;
+    for (const fn of (hub as any).reconnectListeners) fn(); // the connection is back
+    await new Promise((r) => setTimeout(r, 30));
+    expect(cancels).toBe(afterQuickTries + 1);
+    for (const fn of (hub as any).reconnectListeners) fn(); // acknowledged: not sent again
+    await new Promise((r) => setTimeout(r, 30));
+    expect(cancels).toBe(afterQuickTries + 1);
+  } finally {
+    globalThis.fetch = realFetch;
+    Object.defineProperty(globalThis.navigator, "mediaDevices", { value: media, configurable: true });
+  }
+}, 20_000);
