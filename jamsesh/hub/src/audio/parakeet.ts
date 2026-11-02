@@ -5,12 +5,11 @@
 // against a pinned hash. It runs in a child process (stt-server.ts): a decode never blocks the hub,
 // and its memory (about 2 GB) goes back when the hub stops.
 
-import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { type HelperRegistry, stopHelper } from "../children";
 import { config } from "../config";
-import { downloadVerified, type ModelState, type ModelStatus } from "./models";
+import { downloadVerified, sha256File, type ModelState, type ModelStatus } from "./models";
 
 export type { ModelState, ModelStatus };
 
@@ -35,14 +34,8 @@ export function findModel(): string | null {
 
 const MANIFEST = ".files.sha256.json";
 
-const hashFile = async (path: string) => {
-  const h = createHash("sha256");
-  for await (const chunk of Bun.file(path).stream()) h.update(chunk);
-  return h.digest("hex");
-};
-
 /** The SHA-256 of every model file, recorded when the verified archive was unpacked. */
-export const writeManifest = async (dir: string) => writeFileSync(join(dir, MANIFEST), JSON.stringify(Object.fromEntries(await Promise.all(PARAKEET.files.map(async (f) => [f, await hashFile(join(dir, f))])))));
+export const writeManifest = async (dir: string) => writeFileSync(join(dir, MANIFEST), JSON.stringify(Object.fromEntries(await Promise.all(PARAKEET.files.map(async (f) => [f, await sha256File(join(dir, f))])))));
 
 /**
  * Whether the unpacked files are still the ones that were verified. A managed folder without a
@@ -58,7 +51,7 @@ export async function installedIntact(dir: string, managed = true): Promise<bool
   } catch {
     return false;
   }
-  for (const f of PARAKEET.files) if ((await hashFile(join(dir, f))) !== want[f]) return false;
+  for (const f of PARAKEET.files) if ((await sha256File(join(dir, f))) !== want[f]) return false;
   return true;
 }
 
