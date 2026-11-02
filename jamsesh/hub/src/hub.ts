@@ -198,7 +198,7 @@ export class Hub {
     this.transcriber = new Transcriber(this.session, this.helpers);
     this.audio = new AudioPipeline(this.session, this.transcriber);
     this.audio.track = (work) => this.track("speech being transcribed", work);
-    this.canvas = new Canvas(this.session, this.helpers);
+    this.canvas = new Canvas(this.session, this.helpers, dir);
     this.fonts = new FontService(() => this.session.agents(), (id) => this.session.person(id)?.name);
     this.session.fonts = () => this.fonts.state();
     // The host's own canvas and its agents' participants draw frames too: they get the fonts as well.

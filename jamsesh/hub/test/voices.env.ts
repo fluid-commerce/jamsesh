@@ -10,7 +10,7 @@ if (existsSync(model)) {
   mkdirSync(join(home, "models"));
   symlinkSync(model, join(home, "models", "wespeaker_en.onnx"));
 }
-process.env.JAMSESH_HOME ??= home;
+process.env.JAMSESH_HOME = home; // plain =: test/preload.ts already set a throwaway home; this one carries the model link
 process.env.JAMSESH_DATA ??= mkdtempSync(join(tmpdir(), "jam-voices-data-"));
 process.env.JAMSESH_SILENT = "1";
 process.env.JAMSESH_OFFLINE = "1";
