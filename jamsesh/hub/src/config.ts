@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir, networkInterfaces, userInfo } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { createProject, defaultProject, findProject, migrateLegacy, openSession, takeNewSessionMark } from "./projects";
 
 const HOME = process.env.JAMSESH_HOME ?? join(homedir(), ".jamsesh");
@@ -57,20 +57,41 @@ export function lanAddress(): string {
   return "127.0.0.1";
 }
 
+/** The path with every existing part of it resolved through links, so a link into the real folder is seen for what it is. */
+export function canonical(p: string): string {
+  let rest = "";
+  let cur = resolve(p);
+  while (!existsSync(cur) && dirname(cur) !== cur) {
+    rest = rest ? `${basename(cur)}/${rest}` : basename(cur);
+    cur = dirname(cur);
+  }
+  const base = (() => {
+    try {
+      return realpathSync(cur);
+    } catch {
+      return cur;
+    }
+  })();
+  return rest ? join(base, rest) : base;
+}
+
+/** Under `bun test` nothing may resolve the person's real ~/.jamsesh: these paths, followed through links, must be outside it. */
+export function guardTestPaths(paths: string[], realHome: string): void {
+  const real = canonical(realHome);
+  for (const d of paths) {
+    const r = canonical(d);
+    if (r === real || r.startsWith(real + "/")) throw new Error(`Test isolation: ${r} is inside the real JamSesh folder ${real}. Set JAMSESH_HOME to a temp folder.`);
+  }
+}
+const testing = process.env.NODE_ENV === "test" || process.env.BUN_ENV === "test";
+// Checked before anything is read from it (its .env included).
+if (testing) guardTestPaths([HOME], join(userInfo().homedir, ".jamsesh"));
 const envFile = readEnvFile(join(HOME, ".env"));
 const dataDir = process.env.JAMSESH_DATA ?? join(HOME, "host");
 
 /** People, devices, voiceprints and team settings outlive sessions (`jamsesh new` keeps them). */
 const teamDir = process.env.JAMSESH_TEAM ?? (process.env.JAMSESH_DATA ? join(process.env.JAMSESH_DATA, "team") : join(HOME, "team"));
-// Under `bun test` nothing may resolve the person's real ~/.jamsesh: a test that did would write into their live
-// session's folders. test/preload.ts points JAMSESH_HOME at a temp folder; this fails loudly if anything still lands on the real one.
-if (process.env.NODE_ENV === "test" || process.env.BUN_ENV === "test") {
-  const real = join(userInfo().homedir, ".jamsesh");
-  for (const d of [HOME, dataDir, teamDir]) {
-    const r = resolve(d);
-    if (r === real || r.startsWith(real + "/")) throw new Error(`Test isolation: ${r} is inside the real JamSesh folder ${real}. Set JAMSESH_HOME to a temp folder.`);
-  }
-}
+if (testing) guardTestPaths([HOME, dataDir, teamDir], join(userInfo().homedir, ".jamsesh"));
 mkdirSync(teamDir, { recursive: true });
 
 export const config = {

@@ -9,13 +9,29 @@ import { join } from "node:path";
 process.env.NODE_ENV = "test";
 process.env.JAMSESH_HOME ??= mkdtempSync(join(tmpdir(), "jam-test-home-"));
 
-/** The live hub's, relay's and canvas's fixed ports. A test hub listens on port 0 and has no reason to dial these. (Not the dev-preview range from 5100: tests start their own dev proxies there and dial those.) */
-export const LIVE_PORTS = new Set([4790, 4747, 7979, 47900]);
-const LOCAL = new Set(["127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0"]);
+/**
+ * Ports the live JamSesh uses or falls back to: the hub (4747 and the few above it, 4790, the Mac app's 4848 and 4949), the relay (7979) and the
+ * canvas (47900 and the ones above it). A test hub listens on port 0 and has no reason to dial these. (Not the dev-preview range from 5100: tests
+ * start their own dev proxies there and dial those.)
+ */
+export const isLivePort = (p: number) => (p >= 4700 && p <= 4999) || p === 7979 || (p >= 47900 && p <= 47999);
+
+/** Whether a host name is this computer by any spelling: localhost, 127.0.0.0/8, ::1, ::, 0.0.0.0, and the IPv4-mapped forms of those. */
+export function isLocalHost(host: unknown): boolean {
+  if (host === undefined || host === null || host === "") return true;
+  let h = String(host).toLowerCase().replace(/^\[|\]$/g, "");
+  h = h.replace(/^::ffff:/, "");
+  if (/^[0-9a-f]{1,4}:[0-9a-f]{1,4}$/.test(h)) {
+    // ::ffff:7f00:1 style: the two groups are the four bytes
+    const [hi, lo] = h.split(":").map((x) => parseInt(x, 16));
+    h = `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+  }
+  return h === "localhost" || h.endsWith(".localhost") || h === "::1" || h === "::" || h === "0.0.0.0" || /^127\.\d+\.\d+\.\d+$/.test(h);
+}
 
 export function assertNotLive(host: unknown, port: unknown): void {
   const p = Number(port);
-  if (LIVE_PORTS.has(p) && (host === undefined || host === null || LOCAL.has(String(host)))) {
+  if (isLivePort(p) && isLocalHost(host)) {
     throw new Error(`Test isolation: a test tried to reach ${String(host ?? "localhost")}:${p}, a port the live JamSesh uses. Use a hub started on port 0.`);
   }
 }

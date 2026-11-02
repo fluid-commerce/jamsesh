@@ -47,3 +47,29 @@ test("a hub given its own data folder keeps uploads, renders and canvas files th
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+import { mkdirSync as mk, mkdtempSync as mkt, symlinkSync as ln } from "node:fs";
+import { tmpdir as td } from "node:os";
+import { join as jn } from "node:path";
+import { guardTestPaths } from "../src/config";
+import { isLocalHost, isLivePort } from "./preload";
+
+test("a path that leads into the real folder through a link is refused, a temp folder is not", () => {
+  const root = mkt(jn(td(), "iso-"));
+  const real = jn(root, "real-home");
+  mk(jn(real, "host"), { recursive: true });
+  ln(real, jn(root, "link"));
+  expect(() => guardTestPaths([jn(root, "link", "host")], real)).toThrow(/real JamSesh folder/);
+  expect(() => guardTestPaths([jn(root, "link", "not-yet", "made")], real)).toThrow(/real JamSesh folder/); // nearest existing ancestor is followed
+  expect(() => guardTestPaths([jn(root, "elsewhere")], real)).not.toThrow();
+});
+
+test("the fetch guard covers every live port and fallback, and every spelling of this computer", () => {
+  for (const port of [4747, 4750, 4790, 4848, 4949, 7979, 47900, 47931]) expect([port, isLivePort(port)]).toEqual([port, true]);
+  for (const port of [5100, 8080, 51234]) expect([port, isLivePort(port)]).toEqual([port, false]);
+  for (const host of ["localhost", "127.0.0.2", "127.1.2.3", "::1", "[::1]", "::ffff:127.0.0.1", "::ffff:7f00:1", "0.0.0.0", "[::]", "LOCALHOST", undefined]) expect([String(host), isLocalHost(host)]).toEqual([String(host), true]);
+  for (const host of ["example.com", "192.168.1.5", "10.0.0.1"]) expect([host, isLocalHost(host)]).toEqual([host, false]);
+  expect(() => assertNotLive("127.0.0.2", 4747)).toThrow(/Test isolation/);
+  expect(() => assertNotLive("::ffff:127.0.0.1", 4848)).toThrow(/Test isolation/);
+  expect(() => assertNotLive("example.com", 4747)).not.toThrow();
+});

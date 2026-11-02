@@ -128,12 +128,12 @@ const HOST_ONLY_SETTINGS = ["gatewayKey", "models", "hostControl", "brainEnabled
 const waiting = new WeakMap<Request, () => void>();
 /** Per response: the body-memory charge it still holds, released when its stream has ended. */
 /**
- * Files are served by GET and HEAD only. The front door lets a read that has nothing to settle go out as its route made it (a Bun file
+ * Files are served by GET (and HEAD where methods.ts allows it) only. The front door lets a read that has nothing to settle go out as its route made it (a Bun file
  * body must not be read through a reader here: in Bun 1.2 that ends a helper process's stdout, and every canvas call then times out),
  * so no other method may be answered with a file.
  */
 function readOnly(req: Request): Response | null {
-  return req.method === "GET" || req.method === "HEAD" ? null : new Response("That method isn't used here.", { status: 405, headers: { allow: "GET, HEAD" } });
+  return req.method === "GET" || req.method === "HEAD" ? null : new Response("That method isn't used here.", { status: 405, headers: { allow: "GET" } });
 }
 const budgetHeld = new WeakMap<Response, () => void>();
 /** Per request: the wait it carries, told when its reply has been sent or the client has gone. */

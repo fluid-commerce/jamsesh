@@ -1,4 +1,4 @@
-// Files are answered to GET and HEAD only: any other method on a file route gets 405, so a file body never goes through the front door's reader.
+// Files are answered to GET (HEAD where allowed) only: any other method on a file route gets 405, so a file body never goes through the front door's reader.
 import { afterAll, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,7 +15,7 @@ afterAll(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("file routes answer GET and HEAD, and any other method is a 405 (never a file)", async () => {
+test("file routes answer GET, and any write method is a 405 (never a file)", async () => {
   const base = `http://127.0.0.1:${server.port}`;
   for (const path of ["/connect", "/renders/x.png", "/renders/full/x.png", "/canvas/index.html", "/download/mac", "/some/page", "/index.html"]) {
     for (const method of ["POST", "PATCH", "DELETE"]) {
