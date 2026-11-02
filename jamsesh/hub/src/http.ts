@@ -127,6 +127,14 @@ const HOST_ONLY_SETTINGS = ["gatewayKey", "models", "hostControl", "brainEnabled
 /** Per request, what releases its count at once: a request that is only waiting for the room (a hook's listen) isn't work in flight. */
 const waiting = new WeakMap<Request, () => void>();
 /** Per response: the body-memory charge it still holds, released when its stream has ended. */
+/**
+ * Files are served by GET and HEAD only. The front door lets a read that has nothing to settle go out as its route made it (a Bun file
+ * body must not be read through a reader here: in Bun 1.2 that ends a helper process's stdout, and every canvas call then times out),
+ * so no other method may be answered with a file.
+ */
+function readOnly(req: Request): Response | null {
+  return req.method === "GET" || req.method === "HEAD" ? null : new Response("That method isn't used here.", { status: 405, headers: { allow: "GET, HEAD" } });
+}
 const budgetHeld = new WeakMap<Response, () => void>();
 /** Per request: the wait it carries, told when its reply has been sent or the client has gone. */
 const liveCalls = new WeakMap<Request, import("./mcp").LiveCall>();
@@ -373,9 +381,11 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         }
         // The QR code's link, fed to Claude Code or Codex instead of a browser: the agent's guide.
         if (path === "/connect" && url.searchParams.get("c") && !wantsHtml(req) && req.headers.get("sec-fetch-mode") !== "navigate") return agentRoute(hub, req, url, ip);
-        if (PUBLIC_FILES.test(path) || path === "/connect") return webApp(path);
+        if (PUBLIC_FILES.test(path) || path === "/connect") return readOnly(req) ?? webApp(path);
         // The Mac app, for people joining from a browser. It holds no secrets.
         if (path === "/download/mac") {
+          const no = readOnly(req);
+          if (no) return no;
           const dmg = [join(config.home, "JamSesh.dmg"), join(config.repo, "jamsesh", "app", "dist", "JamSesh.dmg")].find((f) => existsSync(f));
           if (!dmg) return new Response("The host doesn't have the Mac app to share yet.", { status: 404 });
           return new Response(Bun.file(dmg), { headers: { "content-type": "application/x-apple-diskimage", "content-disposition": 'attachment; filename="JamSesh.dmg"' } });
@@ -440,14 +450,16 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         }
         // A frame drawn at the size the screen asked for (the stored render is capped at 1600 px): /renders/full/<artifact id>.png?size=2400
         const full = path.match(/^\/renders\/full\/([\w-]+)\.png$/);
-        if (full) return fullRender(hub, full[1], Number(url.searchParams.get("size")));
-        if (path.startsWith("/renders/")) return file(join(hub.canvas.rendersDir, path.slice("/renders/".length)), hub.canvas.rendersDir);
+        if (full) return readOnly(req) ?? (await fullRender(hub, full[1], Number(url.searchParams.get("size"))));
+        if (path.startsWith("/renders/")) return readOnly(req) ?? file(join(hub.canvas.rendersDir, path.slice("/renders/".length)), hub.canvas.rendersDir);
         if (path === "/canvas" || path.startsWith("/canvas/")) {
+          const no = readOnly(req);
+          if (no) return no;
           if (!config.canvasDist) return new Response("The canvas web build isn't installed. Run jamsesh/install.sh.", { status: 404 });
           const rel = path.replace(/^\/canvas\/?/, "") || "index.html";
           return file(join(config.canvasDist, rel), config.canvasDist, true);
         }
-        return webApp(path);
+        return readOnly(req) ?? webApp(path);
       } catch (e) {
         console.error("http:", path, e);
         return bad(e instanceof Error ? e.message : String(e), 500);
