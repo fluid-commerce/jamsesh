@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { homedir, networkInterfaces } from "node:os";
+import { homedir, networkInterfaces, userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import { createProject, defaultProject, findProject, migrateLegacy, openSession, takeNewSessionMark } from "./projects";
 
@@ -62,6 +62,15 @@ const dataDir = process.env.JAMSESH_DATA ?? join(HOME, "host");
 
 /** People, devices, voiceprints and team settings outlive sessions (`jamsesh new` keeps them). */
 const teamDir = process.env.JAMSESH_TEAM ?? (process.env.JAMSESH_DATA ? join(process.env.JAMSESH_DATA, "team") : join(HOME, "team"));
+// Under `bun test` nothing may resolve the person's real ~/.jamsesh: a test that did would write into their live
+// session's folders. test/preload.ts points JAMSESH_HOME at a temp folder; this fails loudly if anything still lands on the real one.
+if (process.env.NODE_ENV === "test" || process.env.BUN_ENV === "test") {
+  const real = join(userInfo().homedir, ".jamsesh");
+  for (const d of [HOME, dataDir, teamDir]) {
+    const r = resolve(d);
+    if (r === real || r.startsWith(real + "/")) throw new Error(`Test isolation: ${r} is inside the real JamSesh folder ${real}. Set JAMSESH_HOME to a temp folder.`);
+  }
+}
 mkdirSync(teamDir, { recursive: true });
 
 export const config = {

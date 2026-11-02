@@ -81,10 +81,12 @@ export class Canvas {
     private session: Session,
     /** Every helper this canvas starts goes in here, so stopping the hub finds them all. */
     private helpers: HelperRegistry = new HelperRegistry(),
+    /** Where renders, uploads and canvas files live: the hub's own data folder (a test hub has its own, not the host's). */
+    dataDir: string = config.dataDir,
   ) {
-    this.serverDir = join(config.dataDir, "figcraft-server");
-    this.rendersDir = join(config.dataDir, "renders");
-    this.filesDir = join(config.dataDir, "canvas-files");
+    this.serverDir = join(dataDir, "figcraft-server");
+    this.rendersDir = join(dataDir, "renders");
+    this.filesDir = join(dataDir, "canvas-files");
     for (const d of [this.serverDir, this.rendersDir, this.filesDir]) mkdirSync(d, { recursive: true });
   }
 
