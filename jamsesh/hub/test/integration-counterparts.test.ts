@@ -1309,3 +1309,21 @@ test("a vault that closes during a commit's Git work gets no follow note and no 
   expect(readFileSync(join(v, ".git", "jamsesh-follow.json"), "utf8")).toBe("[]");
   expect(existsSync(join(v, ".git", "index.lock"))).toBe(false);
 });
+
+test("commitPaths: a deadline that passes after entry writes no follow note and moves no branch", async () => {
+  const { mkdirSync, writeFileSync, existsSync } = await import("node:fs");
+  const { closeVault, commitPaths, gitAvailable } = await import("../src/wiki/files");
+  if (!gitAvailable()) return;
+  const v = mkdtempSync(join(dir, "vault3-"));
+  const git = (...a: string[]) => Bun.spawnSync(["git", "-C", v, ...a], { env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+  git("init", "-q");
+  mkdirSync(join(v, "wiki"), { recursive: true });
+  writeFileSync(join(v, "wiki", "x.md"), "# X\n");
+  const head = () => git("rev-parse", "-q", "--verify", "HEAD").stdout.toString().trim();
+  expect(head()).toBe("");
+  // The room closes while the files are being read: after entry, before the note and the branch move.
+  const r = commitPaths(v, "late", ["wiki/x.md"], () => (closeVault(v), "take"));
+  expect(r).toBe("failed");
+  expect(existsSync(join(v, ".git", "jamsesh-follow.json"))).toBe(false);
+  expect(head()).toBe(""); // the branch did not move
+});
