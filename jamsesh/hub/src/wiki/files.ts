@@ -408,6 +408,7 @@ export function commitPaths(dir: string, message: string, paths: string[], accep
       try {
         // Written before the branch moves: if anything after it fails or the app stops, the next pass finishes the index update from this note.
         // (A note that is already there and can't be read stops the commit: it is never overwritten.)
+        if (vaultClosed(dir)) return "failed"; // the deadline passed during the Git work above: no note, no branch move
         try {
           addFollow(gitDir, entry);
         } catch (e) {
@@ -600,6 +601,7 @@ export function settleIndex(dir: string): void {
   const lock = lockIndex(gitDir);
   if (!lock) return;
   try {
+    if (vaultClosed(dir)) return; // closed while waiting for the lock: the note stays for the next start
     resumeFollow(dir, gitDir, lock);
   } finally {
     lock.release();

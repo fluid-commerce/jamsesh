@@ -1289,3 +1289,23 @@ test("once the vault is closed, committing and settling the index change no Git 
   expect(commitPaths(v, "late", ["wiki/x.md"])).toBe("failed");
   expect(() => settleIndex(v)).not.toThrow();
 });
+
+test("the canvas-comment timer returns its job, so shutdown waits for a delivery that is running", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(join(import.meta.dir, "../src/hub.ts"), "utf8");
+  expect(src).toContain("this.session.timers.every(() => this.flushComments()");
+  expect(src).not.toMatch(/timers\.every\(\(\) => void this\.flushComments/);
+});
+
+test("a vault that closes during a commit's Git work gets no follow note and no branch move", async () => {
+  const { mkdirSync, writeFileSync, readFileSync, existsSync } = await import("node:fs");
+  const { closeVault, settleIndex } = await import("../src/wiki/files");
+  const v = mkdtempSync(join(dir, "vault2-"));
+  mkdirSync(join(v, ".git"), { recursive: true });
+  closeVault(v);
+  // settleIndex after the close does nothing and leaves any note as it was.
+  writeFileSync(join(v, ".git", "jamsesh-follow.json"), "[]");
+  settleIndex(v);
+  expect(readFileSync(join(v, ".git", "jamsesh-follow.json"), "utf8")).toBe("[]");
+  expect(existsSync(join(v, ".git", "index.lock"))).toBe(false);
+});

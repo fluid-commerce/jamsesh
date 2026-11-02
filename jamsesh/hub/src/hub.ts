@@ -330,7 +330,7 @@ export class Hub {
     this.wiki.start();
     this.session.timers.every(() => this.devproxy.refresh(), 30_000);
     this.session.timers.every(() => this.session.tick(), 60_000);
-    this.session.timers.every(() => void this.flushComments(), 20_000);
+    this.session.timers.every(() => this.flushComments(), 20_000); // returned, so shutdown sees the job running
     // Connected clients learn where an HTTPS page reaches the dev servers when remote access turns on, off, or changes.
     let devPublic = String(this.session.devPublicBase(0));
     this.session.timers.every(() => {
