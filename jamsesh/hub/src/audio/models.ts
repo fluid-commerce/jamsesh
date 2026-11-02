@@ -3,6 +3,7 @@
 // and Parakeet's.
 
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 
 export interface Pinned {
   url: string;
@@ -73,9 +74,17 @@ export async function downloadVerified(pin: Pinned, file: string, progress: (pct
 
 /** Whether the file at `path` is exactly the pinned one: its size, then its SHA-256. */
 export async function fileMatches(pin: Pinned, path: string): Promise<boolean> {
-  const f = Bun.file(path);
-  if (f.size !== pin.bytes) return false;
+  if (Bun.file(path).size !== pin.bytes) return false;
+  return (await sha256File(path)) === pin.sha256;
+}
+
+/**
+ * A file's SHA-256, read in chunks. Through node:fs, never `Bun.file().stream()`: in Bun 1.2 a
+ * finished Bun.file stream ends a helper's stdout stream that is being read at the same time (the
+ * canvas host's replies stop arriving and every call to it times out).
+ */
+export async function sha256File(path: string): Promise<string> {
   const hash = createHash("sha256");
-  for await (const chunk of f.stream()) hash.update(chunk);
-  return hash.digest("hex") === pin.sha256;
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest("hex");
 }

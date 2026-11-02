@@ -485,9 +485,14 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       // An upgrade has no response; a body is released when its last byte has gone (or the client left).
       // A read has done its work when its handler returns: a slow client on a streamed answer (the Mac app download) isn't work in flight for a
       // save. Mutating calls and MCP stay counted until their response is sent.
-      if (incoming.method === "GET" || incoming.method === "HEAD") release();
+      const read = incoming.method === "GET" || incoming.method === "HEAD";
+      if (read) release();
       const budget = res ? budgetHeld.get(res) : undefined;
       const live = liveCalls.get(incoming);
+      // A read with nothing left to settle goes out as its route made it. That matters for a file (`new Response(Bun.file(...))`):
+      // Bun sends one itself, but a Bun 1.2 file stream read here would end any helper's stdout being read at the same time, and
+      // the canvas host's replies would stop arriving (every canvas call then times out).
+      if (res && read && !budget && !live) return res;
       if (!res || !res.body) {
         release();
         budget?.();
