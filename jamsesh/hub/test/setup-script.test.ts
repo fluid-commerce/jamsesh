@@ -420,6 +420,52 @@ describe("agent setup script", () => {
     expect(Bun.TOML.parse(toml)).toMatchObject({ model: "gpt", mcp_servers: { other: { url: "http://x" } }, profiles: { a: { k: 1 } } });
   });
 
+  /** An install by the released app (0.1.x): no auth.header; client.env holds the host and the token, empty when the app's relay signs requests. */
+  function releasedInstall(box: ReturnType<typeof sandbox>, token: string | null) {
+    const dir = join(box.home, ".jamsesh");
+    mkdirSync(dir, { recursive: true });
+    const tokenLine = token === null ? "" : `JAMSESH_TOKEN="${token}"\n`;
+    writeFileSync(join(dir, "client.env"), `JAMSESH_HUB="http://127.0.0.1:4790"\n${tokenLine}JAMSESH_NAME="Old"\nJAMSESH_ACTIVE=1\n`, { mode: 0o600 });
+    writeFileSync(join(dir, "hook.sh"), "#!/usr/bin/env bash\n# old hook\n", { mode: 0o755 });
+  }
+
+  test("Codex: the table the released app wrote (credential in client.env, empty when its relay signs) is moved into the markers", async () => {
+    for (const token of ["", "old-room"]) {
+      const box = sandbox();
+      releasedInstall(box, token);
+      mkdirSync(join(box.home, ".codex"), { recursive: true });
+      const config = join(box.home, ".codex/config.toml");
+      writeFileSync(config, `model = "gpt"\n\n${OLD_TABLE("http://127.0.0.1:4790/mcp", token)}`);
+      const r = await run(box);
+      expect(r.code).toBe(0);
+      const toml = readFileSync(config, "utf8");
+      expect(toml.match(/\[mcp_servers\.jamsesh\]/g)).toHaveLength(1);
+      expect(toml).toContain(`# >>> jamsesh\n[mcp_servers.jamsesh]\nurl = "${origin}/mcp"`);
+      expect(Bun.TOML.parse(toml)).toMatchObject({ model: "gpt" });
+    }
+  });
+
+  test("Codex: a released-app install doesn't vouch for a table with another credential, another host, or no token on record", async () => {
+    for (const [stored, token, url] of [
+      ["", "hand-token", "http://127.0.0.1:4790/mcp"],
+      ["old-room", "", "http://127.0.0.1:4790/mcp"],
+      ["", "", "http://elsewhere:9/mcp"],
+      [null, "", "http://127.0.0.1:4790/mcp"],
+    ] as const) {
+      const box = sandbox();
+      releasedInstall(box, stored);
+      mkdirSync(join(box.home, ".codex"), { recursive: true });
+      const config = join(box.home, ".codex/config.toml");
+      const body = `model = "gpt"\n\n${OLD_TABLE(url, token)}`;
+      writeFileSync(config, body);
+      const r = await run(box);
+      expect(r.code).not.toBe(0);
+      expect(r.stderr).toContain("as it is");
+      expect(r.stderr).not.toContain("hand-token");
+      expect(readFileSync(config, "utf8")).toBe(body);
+    }
+  });
+
   test("Codex: a hand-written table with the earlier shape but another credential, another host, or no earlier install is refused untouched", async () => {
     for (const [token, url, earlier] of [
       ["hand-token", "http://old-host:4747/mcp", true],

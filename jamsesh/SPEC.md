@@ -396,7 +396,8 @@ second HTTPS listener serves the same routes on `4443`, mapped to `443` on the r
   lines, and then checks the result with Bun's TOML parser before writing: the edited file must parse,
   hold exactly one `mcp_servers.jamsesh` table with JamSesh's settings, and equal the original
   everywhere else. The one table an earlier JamSesh wrote (its exact two headers and keys, carrying the credential and
-  host that install stored) is moved into the markers; any other `mcp_servers.jamsesh` table, a file that is not valid TOML or a broken marker
+  host that install stored: the host from `client.env`, the credential from `auth.header` or, as the released 0.1.x app
+  kept it, `client.env`'s `JAMSESH_TOKEN`, empty when the app's relay signs requests) is moved into the markers; any other `mcp_servers.jamsesh` table, a file that is not valid TOML or a broken marker
   pair leaves the file untouched with a message. The parser is the one on PATH or in the usual places,
   or the JamSesh app's own hub run as Bun (`JAMSESH_BUN`); with none, Codex is left as it is and the
   person is told what to add by hand. The file is re-read just before the write and setup aborts if

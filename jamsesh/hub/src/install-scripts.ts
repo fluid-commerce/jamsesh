@@ -791,12 +791,20 @@ const isOld = (o) => o && typeof o === "object" && keys(o) === "default_tools_ap
   && o.http_headers && typeof o.http_headers === "object" && keys(o.http_headers) === "authorization"
   && typeof o.http_headers.authorization === "string" && o.http_headers.authorization.startsWith("Bearer ");
 // An unmarked table counts as an earlier JamSesh install's only with that install's own evidence: the
-// credential it stored (compared here, never printed) and the host it was connected to.
+// credential it stored (compared here, never printed) and the host it was connected to. The released
+// app (0.1.x) kept the credential in client.env as JAMSESH_TOKEN, empty when its relay signs requests;
+// later installs keep it in auth.header. Either counts, and only as that install wrote it.
 const prevHeader = read(env.JAMSESH_PREV_HEADER);
-const prevToken = (prevHeader.split("Bearer ")[1] || "").trim();
-const prevHubLine = read(env.JAMSESH_PREV_ENV).split("\\n").find((l) => l.startsWith("JAMSESH_HUB=")) || "";
-const prevHub = prevHubLine.slice("JAMSESH_HUB=".length).trim().replace(/^["']|["']$/g, "");
-const fromEarlierInstall = (o) => prevHeader.includes("Bearer ") && prevHub !== "" && o.http_headers.authorization === "Bearer " + prevToken && o.url === prevHub + "/mcp";
+const prevEnv = read(env.JAMSESH_PREV_ENV).split("\\n");
+const prevValue = (k) => {
+  const l = prevEnv.find((x) => x.startsWith(k + "="));
+  return l === undefined ? undefined : l.slice(k.length + 1).trim().replace(/^["']|["']$/g, "");
+};
+const prevHub = prevValue("JAMSESH_HUB") || "";
+const prevTokens = [];
+if (prevHeader.includes("Bearer ")) prevTokens.push((prevHeader.split("Bearer ")[1] || "").trim());
+if (prevValue("JAMSESH_TOKEN") !== undefined) prevTokens.push(prevValue("JAMSESH_TOKEN"));
+const fromEarlierInstall = (o) => prevHub !== "" && o.url === prevHub + "/mcp" && prevTokens.some((t) => o.http_headers.authorization === "Bearer " + t);
 if (had && !marked && !(isOld(had) && fromEarlierInstall(had))) fail("It has an [mcp_servers.jamsesh] table that JamSesh didn't write.");
 if (!same(next.mcp_servers && next.mcp_servers.jamsesh, want)) fail("The edit would not leave exactly one [mcp_servers.jamsesh] table with JamSesh's settings.");
 if (!same(without(orig), without(next))) fail("The edit would change something outside JamSesh's table.");
