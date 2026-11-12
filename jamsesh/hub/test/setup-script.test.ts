@@ -466,6 +466,26 @@ describe("agent setup script", () => {
     }
   });
 
+  test("Codex: a table someone typed with the released app's exact values, but not its text, is refused untouched", async () => {
+    for (const table of [
+      // The headers as an inline table.
+      '[mcp_servers.jamsesh]\nurl = "http://127.0.0.1:4790/mcp"\ntool_timeout_sec = 600\ndefault_tools_approval_mode = "approve"\nhttp_headers = { authorization = "Bearer " }\n',
+      // The same keys in another order.
+      '[mcp_servers.jamsesh]\ntool_timeout_sec = 600\nurl = "http://127.0.0.1:4790/mcp"\ndefault_tools_approval_mode = "approve"\n\n[mcp_servers.jamsesh.http_headers]\nauthorization = "Bearer "\n',
+    ]) {
+      const box = sandbox();
+      releasedInstall(box, "");
+      mkdirSync(join(box.home, ".codex"), { recursive: true });
+      const config = join(box.home, ".codex/config.toml");
+      const body = `model = "gpt"\n\n${table}`;
+      writeFileSync(config, body);
+      const r = await run(box);
+      expect(r.code).not.toBe(0);
+      expect(r.stderr).toContain("as it is");
+      expect(readFileSync(config, "utf8")).toBe(body);
+    }
+  });
+
   test("Codex: a hand-written table with the earlier shape but another credential, another host, or no earlier install is refused untouched", async () => {
     for (const [token, url, earlier] of [
       ["hand-token", "http://old-host:4747/mcp", true],

@@ -792,8 +792,9 @@ const isOld = (o) => o && typeof o === "object" && keys(o) === "default_tools_ap
   && typeof o.http_headers.authorization === "string" && o.http_headers.authorization.startsWith("Bearer ");
 // An unmarked table counts as an earlier JamSesh install's only with that install's own evidence: the
 // credential it stored (compared here, never printed) and the host it was connected to. The released
-// app (0.1.x) kept the credential in client.env as JAMSESH_TOKEN, empty when its relay signs requests;
-// later installs keep it in auth.header. Either counts, and only as that install wrote it.
+// app (0.1.x) kept the credential in client.env as JAMSESH_TOKEN, empty when its relay signs requests,
+// and wrote its table as one fixed block of text: that block, verbatim, is the rest of its evidence, so
+// a table someone typed with the same values isn't taken for it. Later installs keep it in auth.header.
 const prevHeader = read(env.JAMSESH_PREV_HEADER);
 const prevEnv = read(env.JAMSESH_PREV_ENV).split("\\n");
 const prevValue = (k) => {
@@ -801,10 +802,12 @@ const prevValue = (k) => {
   return l === undefined ? undefined : l.slice(k.length + 1).trim().replace(/^["']|["']$/g, "");
 };
 const prevHub = prevValue("JAMSESH_HUB") || "";
-const prevTokens = [];
-if (prevHeader.includes("Bearer ")) prevTokens.push((prevHeader.split("Bearer ")[1] || "").trim());
-if (prevValue("JAMSESH_TOKEN") !== undefined) prevTokens.push(prevValue("JAMSESH_TOKEN"));
-const fromEarlierInstall = (o) => prevHub !== "" && o.url === prevHub + "/mcp" && prevTokens.some((t) => o.http_headers.authorization === "Bearer " + t);
+const headerToken = prevHeader.includes("Bearer ") ? (prevHeader.split("Bearer ")[1] || "").trim() : undefined;
+const envToken = prevValue("JAMSESH_TOKEN");
+const releasedBlock = (t) => "\\n[mcp_servers.jamsesh]\\nurl = \\"" + prevHub + "/mcp\\"\\ntool_timeout_sec = 600\\ndefault_tools_approval_mode = \\"approve\\"\\n\\n[mcp_servers.jamsesh.http_headers]\\nauthorization = \\"Bearer " + t + "\\"\\n";
+const fromEarlierInstall = (o) => prevHub !== "" && o.url === prevHub + "/mcp" && (
+  (headerToken !== undefined && o.http_headers.authorization === "Bearer " + headerToken) ||
+  (envToken !== undefined && o.http_headers.authorization === "Bearer " + envToken && oldText.includes(releasedBlock(envToken))));
 if (had && !marked && !(isOld(had) && fromEarlierInstall(had))) fail("It has an [mcp_servers.jamsesh] table that JamSesh didn't write.");
 if (!same(next.mcp_servers && next.mcp_servers.jamsesh, want)) fail("The edit would not leave exactly one [mcp_servers.jamsesh] table with JamSesh's settings.");
 if (!same(without(orig), without(next))) fail("The edit would change something outside JamSesh's table.");
