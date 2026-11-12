@@ -51,7 +51,14 @@ joined() { printf '{"session_id":"%s"}' "$1" | post --max-time 3 --data-binary @
 pid="p$now-$$-$RANDOM$RANDOM"
 # The room this chat was last seen joined to (the host's room id, kept in the chat's marker): a
 # queued prompt belongs to that room and is never sent to another.
-room="$(tr -cd 'A-Za-z0-9-' < "$mark" 2>/dev/null)"
+room="$( { tr -cd 'A-Za-z0-9-' < "$mark"; } 2>/dev/null)"
+# A chat this Mac never saw join leaves the host alone and says nothing, whether or not the host is
+# running: its tool calls, turn ends, and idle listener end here. Two calls still ask: its prompts (so
+# "connect to jamsesh" reaches the host) and the tool call right after its jam_join, which is where
+# the join is first seen and the marker written.
+if [ ! -f "$mark" ] && [ "$1" != "prompt" ]; then
+  [ "$1" = "tool" ] && printf '%s' "$body" | grep -Eq '"tool_name"[[:space:]]*:[[:space:]]*"[^"]*jam_join"' || exit 0
+fi
 # The host was unreachable a moment ago: don't make every prompt wait for it again. A chat this Mac
 # saw joined keeps its prompts until the host is back. Each queued prompt is its own file, written
 # whole and then moved in, so hooks running at once never wait on each other or lose one; its name

@@ -555,7 +555,12 @@ with nothing (a wait that ends checks the agent is still in the room), handovers
 acknowledged are dropped, and its share of each open task is cancelled, with one feed line naming the
 tasks so the room can hand them to someone else; other targets of a shared task carry on.
 
-`hook.sh` does nothing unless `client.env` exists and `JAMSESH_ACTIVE=1`. Before it sends anything it
+`hook.sh` does nothing unless `client.env` exists and `JAMSESH_ACTIVE=1`. A chat this Mac never saw
+join (no marker, `~/.jamsesh/chats/<session id>`) gets nothing from it either, whether or not the
+host is running: its tool calls, turn ends, and idle listener end at once, asking nothing, printing
+nothing, and waking no one. Only its prompts ask the host (so "connect to jamsesh" reaches it), and so
+does the tool call right after its `jam_join`, which is where the join is first seen and the marker
+written. Before it sends anything it
 asks the host whether the chat has joined, every time (the question carries the session id only),
 so a chat the room removed, or a host this Mac has switched away from, gets nothing more. Hook calls
 have a 4-second limit (the joined question 3). Each prompt carries an id (`x-jam-prompt-id`), and the
@@ -780,7 +785,7 @@ steps, and an idle agent goes back to its person and is woken when the room has 
 4. **Wake-up.** A second `Stop` hook, `hook.sh listen`, runs in the background (`asyncRewake`).
    It calls `/api/hooks/listen`, which the hub holds open (up to about 200 seconds, which the
    server's idle limit allows) until the room has something for that agent; the script calls again
-   until about 50 minutes (3000 seconds) pass (and keeps asking through a host that is down meanwhile); at that limit, with the chat still in the room, it exits 2 with "keep listening: call jam_wait", so the agent is woken into the `jam_wait` fallback and stays reachable; the hook's own `timeout` is 3300 seconds, since Claude Code enforces it on async hooks too (its default is 600). With news it prints it and exits with code 2, which wakes the agent
+   until about 50 minutes (3000 seconds) pass (and keeps asking through a host that is down meanwhile, for a chat this Mac saw join; a chat it never saw join has no listener at all); at that limit, with the chat still in the room, it exits 2 with "keep listening: call jam_wait", so the agent is woken into the `jam_wait` fallback and stays reachable; the hook's own `timeout` is 3300 seconds, since Claude Code enforces it on async hooks too (its default is 600). With news it prints it and exits with code 2, which wakes the agent
    with that text as its next turn (the script prints the items to stderr, which is what Claude sees on a rewake). Async hooks are killed when a non-interactive `claude -p` run ends, so the wake-up works in interactive chats only. Verified on 2026-10-29 in a real interactive Claude Code 2.1.308 chat: an idle chat woke when a background `Stop` hook exited 2. The full JamSesh path (installed hooks, a hub, a real room) still needs a real room. A newer listener for the same agent, or the person's next
    prompt, ends the old one empty; an agent that is itself in `jam_wait` or `jam_ask` is left to
    get its items there.

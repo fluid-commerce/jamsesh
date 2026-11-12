@@ -271,8 +271,9 @@ test("hook.sh records what it passed on and acknowledges it with its next call; 
   Hub.DELIVERY_RETRY_MS = 150;
   try {
     const a = joinChat("chat-script");
-    const d = directive("Tighten the nav", [a.id]);
     const { home, run } = box(viaRelay, macA.token);
+    await run("tool", { session_id: "chat-script", tool_name: "mcp__jamsesh__jam_join" });
+    const d = directive("Tighten the nav", [a.id]);
     const first = await run("tool", { session_id: "chat-script", tool_name: "Edit" });
     expect(first.out).toContain("Tighten the nav");
     const acks = join(home, "acks/chat-script");
@@ -321,7 +322,8 @@ test("hook.sh sends nothing more for a chat once the room removed it, or after a
     bodies.length = 0;
     await run("prompt", { session_id: "chat-m", prompt: "secret plans" });
     await run("tool", { session_id: "chat-m", tool_name: "Read", tool_response: "secret file contents" });
-    expect(bodies.map((b) => b.path)).toEqual(["/api/hooks/joined", "/api/hooks/joined"]);
+    // The prompt asks and learns it's out; the tool call after it, with no marker left, asks nothing.
+    expect(bodies.map((b) => b.path)).toEqual(["/api/hooks/joined"]);
     expect(JSON.stringify(bodies)).not.toContain("secret");
     expect(existsSync(join(home, "chats/chat-m"))).toBe(false);
     // The joined question carries only the session id.
@@ -347,6 +349,7 @@ test("hook.sh sends nothing more for a chat once the room removed it, or after a
 test("hook.sh listen against a real hub wakes the agent, and the wake is acknowledged by the next hook", async () => {
   const a = joinChat("chat-wake");
   const { home, run } = box(viaRelay, macA.token);
+  await run("tool", { session_id: "chat-wake", tool_name: "mcp__jamsesh__jam_join" });
   mkdirSync(join(home, "acks"), { recursive: true });
   const waking = run("listen", { session_id: "chat-wake" }, { JAMSESH_LISTEN_SECONDS: "20" });
   await Bun.sleep(400);
@@ -428,7 +431,7 @@ test("hook.sh outbox: a lost answer is replayed under the same id, a failed repl
     const entries = () => (existsSync(outbox) ? readdirSync(outbox).filter((f) => !f.startsWith(".")) : []);
     const idle = () => !existsSync(join(outbox, ".replaying"));
     // Joined once (the marker keeps room A), then the first prompt is accepted but answered too late.
-    await run("tool", { session_id: "chat-q", tool_name: "Edit" });
+    await run("tool", { session_id: "chat-q", tool_name: "mcp__jamsesh__jam_join" });
     expect(readFileSync(join(home, "chats/chat-q"), "utf8")).toBe("room-A");
     st.slowMs = 5000;
     st.slowAll = true;
@@ -464,7 +467,7 @@ test("hook.sh outbox: a prompt that fails while a slow replay runs is still queu
   try {
     const { home, run } = box(`http://127.0.0.1:${fake.port}`, "tok");
     const outbox = join(home, "outbox");
-    await run("tool", { session_id: "chat-r", tool_name: "Edit" }); // joined: the marker keeps room A
+    await run("tool", { session_id: "chat-r", tool_name: "mcp__jamsesh__jam_join" }); // joined: the marker keeps room A
     const now = Math.floor(Date.now() / 1000);
     mkdirSync(outbox, { recursive: true });
     writeFileSync(join(outbox, `${now}_pold-1_room-A`), JSON.stringify({ session_id: "chat-r", prompt: "queued earlier" }));
@@ -494,7 +497,7 @@ test("hook.sh outbox: a prompt queued for one room is never sent to another", as
     writeFileSync(join(outbox, `${now}_pA-1_room-A`), JSON.stringify({ session_id: "chat-s", prompt: "for room A only" }));
     // This Mac now reaches room B, and the same chat joined it.
     st.room = "room-B";
-    await run("tool", { session_id: "chat-s", tool_name: "Edit" });
+    await run("tool", { session_id: "chat-s", tool_name: "mcp__jamsesh__jam_join" });
     expect(readFileSync(join(home, "chats/chat-s"), "utf8")).toBe("room-B");
     await until(() => !existsSync(join(outbox, ".replaying")) && st.prompts.length === 0);
     await Bun.sleep(300);
@@ -544,6 +547,12 @@ test("a hook call that names no room, or another, is refused before anything is 
   expect(ok.status).toBe(200);
 });
 
+/** What hook.sh writes once it sees a chat joined: the chat's marker, holding its room. */
+const sawJoin = (home: string, sid: string, room = "r1") => {
+  mkdirSync(join(home, "chats"), { recursive: true });
+  writeFileSync(join(home, "chats", sid), room);
+};
+
 test("hook.sh listen keeps asking through a host that is down, then wakes the idle chat with no prompt or tool call in between", async () => {
   let joinedCalls = 0;
   const fake = Bun.serve({
@@ -559,6 +568,7 @@ test("hook.sh listen keeps asking through a host that is down, then wakes the id
     const home = mkdtempSync(join(tmpdir(), "jam-listen-"));
     const env = join(home, "client.env");
     writeFileSync(env, `JAMSESH_HUB="http://127.0.0.1:${fake.port}"\nJAMSESH_TOKEN="t"\nJAMSESH_ACTIVE=1\n`);
+    sawJoin(home, "chat-idle");
     const proc = Bun.spawn(["/bin/bash", "-c", hookScript(), "hook", "listen"], {
       env: { HOME: home, PATH: "/usr/bin:/bin", JAMSESH_CLIENT_ENV: env, JAMSESH_DIR: home, JAMSESH_LISTEN_SECONDS: "30", JAMSESH_RETRY_SECONDS: "0.2" },
       stdin: new Blob([JSON.stringify({ session_id: "chat-idle" })]),
@@ -586,6 +596,7 @@ test("hook.sh listen at its time limit wakes the agent into jam_wait, so an idle
     const home = mkdtempSync(join(tmpdir(), "jam-listen-end-"));
     const env = join(home, "client.env");
     writeFileSync(env, `JAMSESH_HUB="http://127.0.0.1:${fake.port}"\nJAMSESH_TOKEN="t"\nJAMSESH_ACTIVE=1\n`);
+    sawJoin(home, "chat-end");
     const run = async (extra: Record<string, string>) => {
       const proc = Bun.spawn(["/bin/bash", "-c", hookScript(), "hook", "listen"], {
         env: { HOME: home, PATH: "/usr/bin:/bin", JAMSESH_CLIENT_ENV: env, JAMSESH_DIR: home, JAMSESH_LISTEN_SECONDS: "2", JAMSESH_RETRY_SECONDS: "0.2", ...extra },
@@ -608,6 +619,7 @@ test("hook.sh listen that can't reach the host until its time is up still wakes 
     const home = mkdtempSync(join(tmpdir(), "jam-listen-out-"));
     const env = join(home, "client.env");
     writeFileSync(env, `JAMSESH_HUB="http://127.0.0.1:${fake.port}"\nJAMSESH_TOKEN="t"\nJAMSESH_ACTIVE=1\n`);
+    sawJoin(home, "chat-out");
     const proc = Bun.spawn(["/bin/bash", "-c", hookScript(), "hook", "listen"], {
       env: { HOME: home, PATH: "/usr/bin:/bin", JAMSESH_CLIENT_ENV: env, JAMSESH_DIR: home, JAMSESH_LISTEN_SECONDS: "2", JAMSESH_RETRY_SECONDS: "0.2" },
       stdin: new Blob([JSON.stringify({ session_id: "chat-out" })]),
@@ -615,6 +627,57 @@ test("hook.sh listen that can't reach the host until its time is up still wakes 
     });
     expect(await proc.exited).toBe(2);
     expect(await new Response(proc.stderr).text()).toContain("keep listening: call jam_wait");
+  } finally {
+    fake.stop(true);
+  }
+});
+
+test("a chat this Mac never saw join: with the host down, no hook asks it, prints anything, or wakes the agent", async () => {
+  // Nothing listens on this port: the host isn't running.
+  const probe = Bun.serve({ port: 0, fetch: () => new Response("") });
+  const port = probe.port;
+  probe.stop(true);
+  const { home, run } = box(`http://127.0.0.1:${port}`, "tok");
+  const quick = { JAMSESH_LISTEN_SECONDS: "2", JAMSESH_RETRY_SECONDS: "0.2" };
+  const t0 = Date.now();
+  for (const [kind, body] of [
+    ["tool", { session_id: "chat-never", tool_name: "Edit" }],
+    ["stop", { session_id: "chat-never" }],
+    ["listen", { session_id: "chat-never" }],
+    ["prompt", { session_id: "chat-never", prompt: "fix the footer" }],
+  ] as const) {
+    const r = await run(kind, body, quick);
+    expect({ kind, ...r }).toEqual({ kind, out: "", err: "", code: 0 });
+  }
+  // listen ended at once rather than waiting out its time on the host.
+  expect(Date.now() - t0).toBeLessThan(1500);
+  expect(existsSync(join(home, "chats/chat-never"))).toBe(false);
+  expect(existsSync(join(home, "outbox"))).toBe(false);
+});
+
+test("a chat this Mac never saw join leaves a running host alone too, except to ask after jam_join and on a prompt", async () => {
+  const asked: string[] = [];
+  const fake = Bun.serve({
+    port: 0,
+    fetch: async (req) => {
+      const path = new URL(req.url).pathname;
+      asked.push(path);
+      if (path.endsWith("/hooks/joined")) return Response.json({ joined: true, room: "r1" });
+      return new Response("", { headers: { "x-jam-joined": "1" } });
+    },
+  });
+  try {
+    const { home, run } = box(`http://127.0.0.1:${fake.port}`, "tok");
+    await run("tool", { session_id: "chat-new", tool_name: "Edit" });
+    await run("stop", { session_id: "chat-new" });
+    await run("listen", { session_id: "chat-new" }, { JAMSESH_LISTEN_SECONDS: "1" });
+    expect(asked).toEqual([]);
+    // The tool call right after jam_join is where the join is first seen: from then on the hooks ask.
+    await run("tool", { session_id: "chat-new", tool_name: "mcp__jamsesh__jam_join" });
+    expect(readFileSync(join(home, "chats/chat-new"), "utf8")).toBe("r1");
+    asked.length = 0;
+    await run("stop", { session_id: "chat-new" });
+    expect(asked).toEqual(["/api/hooks/joined", "/api/hooks/stop"]);
   } finally {
     fake.stop(true);
   }

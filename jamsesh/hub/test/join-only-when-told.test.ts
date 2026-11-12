@@ -156,9 +156,9 @@ describe("hooks do nothing for a chat that didn't join", () => {
     expect(r.calls).toEqual(["/api/hooks/joined"]);
     expect(r.out).toBe("");
   });
-  test("the stop hook doesn't hold an unjoined chat", async () => {
+  test("the stop hook doesn't hold an unjoined chat, or even ask the host about it", async () => {
     const r = await runHook("stop", { session_id: "abc-1" }, false);
-    expect(r.calls).toEqual(["/api/hooks/joined"]);
+    expect(r.calls).toEqual([]);
     expect(r.out).toBe("");
   });
   test("asking to connect hands the chat its id for jam_join, and still sends nothing", async () => {

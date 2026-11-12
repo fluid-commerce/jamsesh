@@ -98,6 +98,9 @@ test("hook.sh: a host switch between the room check and the replay leaves the pr
     const home = mkdtempSync(join(dir, "client-"));
     writeFileSync(join(home, "client.env"), `JAMSESH_HUB='http://127.0.0.1:${fake.port}'\nJAMSESH_ACTIVE=1\n`);
     mkdirSync(join(home, "outbox"), { recursive: true });
+    // This Mac saw the chat join room A (its marker).
+    mkdirSync(join(home, "chats"), { recursive: true });
+    writeFileSync(join(home, "chats", "chat-sw"), "room-A");
     const now = Math.floor(Date.now() / 1000);
     const entry = `${now}_pq-1_room-A`;
     writeFileSync(join(home, "outbox", entry), JSON.stringify({ session_id: "chat-sw", prompt: "for room A" }));

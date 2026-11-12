@@ -280,6 +280,9 @@ test("hook.sh listen holds in the background and exits 2 with the room's news", 
     writeFileSync(join(home, "hook.sh"), hookScript(), { mode: 0o755 });
     writeFileSync(join(home, "client.env"), `JAMSESH_ACTIVE=1\nJAMSESH_HUB=http://127.0.0.1:${server.port}\n`);
     writeFileSync(join(home, "auth.header"), `authorization: Bearer ${cred.token}\n`, { mode: 0o600 });
+    // This Mac saw the chat join (its marker, which a hook writes once the host says it joined).
+    require("node:fs").mkdirSync(join(home, "chats"), { recursive: true });
+    writeFileSync(join(home, "chats", "chat-1"), hub.session.roomId());
     const run = (seconds: number) => Bun.spawn(["bash", join(home, "hook.sh"), "listen"], { stdin: new Blob([JSON.stringify({ session_id: "chat-1" })]), stdout: "pipe", stderr: "pipe", env: { ...process.env, JAMSESH_CLIENT_ENV: join(home, "client.env"), JAMSESH_DIR: home, JAMSESH_LISTEN_SECONDS: String(seconds) } });
     const waking = run(20);
     await Bun.sleep(400);
