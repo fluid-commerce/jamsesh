@@ -393,6 +393,7 @@ export class Hub {
     const unfinished = await this.drain(Hub.SHUTDOWN_MS.work);
     if (unfinished.length) console.error(`Shutdown: still working on ${unfinished.join(", ")}; the final save may miss it.`);
     this.audio.closed = true; // an upload still sending now is refused, not taken in behind the flush
+    this.audio.retractAll(); // the room is ending: no window keeps an early line
     const docs = !unfinished.length && !this.workLost;
     this.canvas.flushActivity(); // canvas work still batched for a timer is recorded while the conversation is open
     this.brain.stop();
@@ -555,6 +556,7 @@ export class Hub {
     // The window ends on its own (SPEC 11.3) if Stop never arrives; nothing said in it is lost.
     w.timer = this.session.timers.after(() => this.releasePrompt(deviceId, w), max + 1000) ?? undefined;
     this.promptMode.set(deviceId, w);
+    this.audio.retractAll(); // a recording is open: nothing is shown early, and what is showing goes
     return w;
   }
 
@@ -826,6 +828,7 @@ export class Hub {
     // The lock goes quiet after 20 minutes untouched; a recording is somebody being there.
     if (screenId) (rec.keep = setInterval(() => s.touchLock(screenId), 60_000)).unref?.();
     this.recs.set(deviceId, rec);
+    this.audio.retractAll();
     s.setRecording({ id, deviceId, personId: rec.personId, personName: person?.name ?? "Someone", screenId, since: Date.now() });
     return { ok: true, id };
   }

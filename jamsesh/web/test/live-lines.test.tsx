@@ -125,3 +125,19 @@ test("the empty-feed note is not shown while an early line is", () => {
   feed(baseState([], []));
   expect(render(<RoomFeed big />).container.querySelector(".empty-note")).not.toBeNull();
 });
+
+test("transition: the socket closing drops every early line from the cached state, and keeps the settled ones", () => {
+  const h = hub as any;
+  h.handle({ type: "state", state: baseState([], []) });
+  h.handle({ type: "utterance", utterance: utt({ id: "real", settled: undefined, t0: 1 }) });
+  h.handle({ type: "utterance", utterance: utt({ id: "early", t0: 2 }) });
+  const fake = { close() {} };
+  h.ws = fake;
+  h.handle({ type: "talking", talkers: [{ deviceId: "d", personId: null, name: "Ana", color: "", level: 0.5, live: true }] });
+  h.closed(fake);
+  expect(hub.get().state!.utterances.map((u) => u.id)).toEqual(["real"]);
+  expect(hub.get().talkers).toEqual([]);
+  // The next state is the truth: another window's early line is only there if the hub still has it.
+  h.handle({ type: "state", state: baseState([], []) });
+  expect(hub.get().state!.utterances).toEqual([]);
+});

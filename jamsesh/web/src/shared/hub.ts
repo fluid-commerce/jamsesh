@@ -205,8 +205,9 @@ class HubClient {
       ws.close();
     } catch {}
     this.ws = null;
-    // Who was talking is only known while connected.
-    if (this.snap.talkers.length) this.set({ talkers: [] });
+    // Who was talking, and early lines still settling, are only known while connected: the next state is the truth.
+    const s = this.snap.state;
+    this.set({ talkers: [], ...(s?.utterances.some((u) => u.settled === false) ? { state: { ...s, utterances: s.utterances.filter((u) => u.settled !== false) } } : {}) });
     this.clear("connect");
     this.clear("heartbeat");
     this.clear("resync");

@@ -544,6 +544,21 @@ export class AudioPipeline {
     return u;
   }
 
+  /**
+   * Every early line goes, from every window: early lines became disallowed (a recording opened) or the room is ending.
+   * The one function for it; a single group's retract is the same step for one line.
+   */
+  retractAll() {
+    for (const g of [...this.open, ...this.finalized]) {
+      g.previewId = null;
+      g.preview = null;
+    }
+    for (const id of [...this.session.previews.keys()]) {
+      this.session.previews.delete(id);
+      bus.send({ type: "utterance-retracted", id });
+    }
+  }
+
   /** The group's early line didn't become a line (a twin, an echo, the join read, nothing heard): it goes away. */
   private retract(g: Group) {
     const id = g.previewId;

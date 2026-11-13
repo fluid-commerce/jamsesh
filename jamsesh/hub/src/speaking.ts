@@ -92,9 +92,11 @@ export class Speaking {
 
   /** A laptop went away, or its mic was muted: it is not talking. */
   drop(deviceId: string) {
+    this.rate.delete(deviceId);
     const cur = this.entries.get(deviceId);
     if (!cur) return;
     this.clearTimer(cur);
+    this.rate.delete(deviceId);
     this.entries.delete(deviceId);
     this.publish();
   }
@@ -107,6 +109,7 @@ export class Speaking {
       const mine = u.personId ? owner === u.personId : !owner && u.devices.some((x) => x.deviceId === id);
       if (!mine) continue;
       this.clearTimer(e);
+      this.rate.delete(id);
       this.entries.delete(id);
       any = true;
     }
@@ -133,7 +136,8 @@ export class Speaking {
     for (const [id, e] of this.entries) {
       if (e.live && now - e.at > STALE_MS) {
         this.clearTimer(e);
-        this.entries.delete(id);
+        this.rate.delete(id);
+      this.entries.delete(id);
         any = true;
       }
     }

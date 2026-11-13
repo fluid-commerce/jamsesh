@@ -599,3 +599,79 @@ test("a speaking start received while the mic is muted is refused and clears the
   expect(r.msgs.at(-1)!.talkers).toMatchObject([{ name: "Ana" }]);
   r.done();
 });
+
+// ---- every way an early line's life ends ----
+
+async function earlyShown(name: string) {
+  const r = await openHub(name);
+  const { hub } = r;
+  for (const id of ["lap-a", "lap-b", "lap-c"]) hub.session.touchDevice(id, { label: id, micOn: true, location: "room", kind: "client" });
+  const said = new Map<string, string>();
+  stub(hub, said);
+  const watcher = await r.open(r.browser.token);
+  const wav = encodeWav({ sampleRate: 16000, samples: speech(2, 91, 0.3) });
+  said.set(String(Bun.hash(wav)), "put the pricing page up");
+  const t = base();
+  await hub.audio.ingest({ deviceId: "lap-a", t0: t, t1: t + 2000, wav });
+  await Bun.sleep(80);
+  expect(hub.session.previews.size).toBe(1);
+  return { ...r, watcher, id: [...hub.session.previews.keys()][0] };
+}
+
+test("transition: a recording opening takes every early line back, from every window", async () => {
+  const r = await earlyShown("t-rec");
+  try {
+    r.hub.promptStart("lap-b");
+    await Bun.sleep(100);
+    expect(r.hub.session.previews.size).toBe(0);
+    expect(r.watcher.got.filter((m) => m.type === "utterance-retracted").map((m) => m.id)).toEqual([r.id]);
+    // The group settles as it always did, under a new id, with no early line.
+    await r.hub.audio.flush();
+    expect(r.hub.session.previews.size).toBe(0);
+  } finally {
+    r.stop();
+  }
+});
+
+test("transition: the hub shutting down takes every early line back", async () => {
+  const r = await earlyShown("t-stop");
+  try {
+    const seen: any[] = [];
+    const off = bus.on((m) => seen.push(m));
+    await r.hub.shutdown();
+    off();
+    expect(r.hub.session.previews.size).toBe(0);
+    // Its line settled in the shutdown's flush (the same id) or was taken back: never left showing.
+    const ended = seen.filter((m) => (m.type === "utterance-retracted" && m.id === r.id) || (m.type === "utterance" && m.utterance.id === r.id && m.utterance.settled !== false));
+    expect(ended.length).toBeGreaterThanOrEqual(1);
+  } finally {
+    r.stop();
+  }
+});
+
+test("transition: retractAll leaves a group's later settle clean (no stale id)", async () => {
+  const r = room();
+  const t = base();
+  await r.hear("lap-a", t, 2, "ship it", 95, 0.4);
+  await Bun.sleep(40);
+  expect(r.session.previews.size).toBe(1);
+  r.pipeline.retractAll();
+  expect(r.session.previews.size).toBe(0);
+  await r.pipeline.flush();
+  expect(r.session.store.all("utterances").map((u) => u.text)).toEqual(["ship it"]);
+  expect(r.session.previews.size).toBe(0);
+  r.off();
+});
+
+test("a device's rate counter goes with its speaking entry", async () => {
+  const r = talk();
+  for (let i = 0; i < 20; i++) r.speaking.update("a", true, -30); // over the limit
+  r.session.touchDevice("a", { micOn: false });
+  await Bun.sleep(100);
+  r.session.touchDevice("a", { micOn: true });
+  await Bun.sleep(100);
+  r.speaking.update("a", true, -30);
+  await Bun.sleep(250);
+  expect(r.msgs.at(-1)!.talkers).toMatchObject([{ name: "Ana" }]);
+  r.done();
+});
