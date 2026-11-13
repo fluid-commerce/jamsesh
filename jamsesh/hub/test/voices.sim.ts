@@ -176,7 +176,7 @@ export function makeRoom(opts: { owners?: boolean } = {}): Room {
   for (const l of LAPTOPS) session.touchDevice(l.id, { label: l.id, personId: opts.owners === false || !l.owner ? null : people[l.owner].id, micOn: true, location: "room", kind: l.owner ? "client" : "host" });
   const texts = new Map<string, string>();
   const transcriber = { transcribe: async (wav: Uint8Array) => ({ text: texts.get(String(Bun.hash(wav))) ?? "", engine: "stub" }) } as any;
-  const pipeline = new AudioPipeline(session, transcriber);
+  const pipeline = new AudioPipeline(session, transcriber, () => false);
   const heard: Utterance[] = [];
   pipeline.onLine = (u, isNew) => isNew && heard.push(u);
   return { session, pipeline, people, say: texts, heard };

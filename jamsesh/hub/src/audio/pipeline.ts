@@ -160,14 +160,14 @@ export class AudioPipeline {
   onLine: ((u: Utterance, isNew: boolean) => void) | null = null;
   /** Called when a line is shown to the room's windows, early copy or settled (the talking indicator gives way to it). Display only. */
   onShown: ((u: Utterance) => void) | null = null;
-  /** The hub's live recording state: while any recording window is open, nothing is shown early (lines settle as they always did). */
-  recordingActive: (() => boolean) | null = null;
   /** Counts a transcription as work in flight (Hub.track), so shutdown waits for its line. */
   track: <T>(work: Promise<T>) => Promise<T> = (work) => work;
 
   constructor(
     private session: Session,
     private transcriber: Transcriber,
+    /** The hub's live recording state, required: while any recording is open, nothing is shown early (lines settle as they always did). */
+    private recordingActive: () => boolean,
   ) {
     this.voiceprints = new Voiceprints(session.store);
   }
@@ -522,7 +522,7 @@ export class AudioPipeline {
    */
   private earlyLine(g: Group, seg: Segment, heard: { text: string; engine: string }): Utterance | undefined {
     const { text, engine } = heard;
-    if (!text || this.recordingActive?.() || this.isCalibration(text, g)) return undefined;
+    if (!text || this.recordingActive() || this.isCalibration(text, g)) return undefined;
     const guess = this.identify([seg], seg, !g.split);
     const u: Utterance = {
       id: newId("utt"),

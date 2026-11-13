@@ -1524,8 +1524,9 @@ Every client window and the big screen capture audio; it's consolidated on the h
   right away as an early line (dimmed), under the id its settled line will keep. It is display only: it lives in memory
   (`session.previews`), is never stored, is not an event, and is not sent to agents, so the brain, directives, routing and
   the wiki act once, on the settled line, when the window closes. The settled line replaces it in place (text, speaker,
-  laptops). An early line may be shown and later taken back: the echo, twin and join-read checks and the recording
-  exclusion run before it shows, but the settled copies can still decide to drop it (no words, a twin, an echo). A
+  laptops). While any recording is open in the session, no early lines show at all: lines settle exactly as they
+  always did. Otherwise an early line may be shown and later taken back: the echo, twin and join-read checks run before
+  it shows, but the settled copies can still decide to drop it (no words, a twin, an echo). A
   taken-back line is display only too, and agents never hear it. Early lines have `settled: false`; stored lines have no such field.
 - **Who is talking.** A microphone that hears speech start tells the hub (`speaking`, with a coarse level five times a
   second at most); the hub shows "Ana is talking" with a few level bars under the room's lines, in every person's window

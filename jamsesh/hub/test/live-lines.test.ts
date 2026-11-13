@@ -42,7 +42,7 @@ function room(remote: string[] = []) {
   session.touchDevice("lap-b", { personId: bob.id });
   const said = new Map<string, string>();
   const transcriber = { transcribe: async (wav: Uint8Array) => ({ text: said.get(String(Bun.hash(wav))) ?? "", engine: "stub" }) } as any;
-  const pipeline = new AudioPipeline(session, transcriber);
+  const pipeline = new AudioPipeline(session, transcriber, () => false);
   const lines: { u: Utterance; isNew: boolean }[] = [];
   pipeline.onLine = (u, isNew) => lines.push({ u, isNew });
   const sent: BusMessage[] = [];
@@ -582,4 +582,20 @@ test("while any recording is open, no early line reaches any window; lines settl
   } finally {
     r.stop();
   }
+});
+
+test("a speaking start received while the mic is muted is refused and clears the entry: unmuting alone shows nothing", async () => {
+  const r = talk();
+  r.speaking.update("a", true, -30);
+  await Bun.sleep(250);
+  r.session.touchDevice("a", { micOn: false });
+  r.speaking.update("a", true, -30);
+  await Bun.sleep(320);
+  r.session.touchDevice("a", { micOn: true });
+  await Bun.sleep(320);
+  expect(r.msgs.at(-1)!.talkers).toEqual([]);
+  r.speaking.update("a", true, -30);
+  await Bun.sleep(250);
+  expect(r.msgs.at(-1)!.talkers).toMatchObject([{ name: "Ana" }]);
+  r.done();
 });

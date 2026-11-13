@@ -419,7 +419,7 @@ export class SimRoom {
   constructor(transcriber: Transcriber, session: Session) {
     this.session = session;
     this.store = session.store;
-    this.pipeline = new AudioPipeline(session, transcriber);
+    this.pipeline = new AudioPipeline(session, transcriber, () => false);
     this.pipeline.onLine = (u, isNew) => this.events.push({ u: structuredClone(u), isNew, at: Date.now() });
     for (const c of CAST) {
       this.people[c.key] = session.upsertPerson({ name: c.name, role: "designer" });

@@ -55,7 +55,7 @@ function room(laptops = ["lap-a", "lap-b", "lap-c", "lap-d"]) {
       return { text, engine: "stub" };
     },
   } as any;
-  const pipeline = new AudioPipeline(session, transcriber);
+  const pipeline = new AudioPipeline(session, transcriber, () => false);
   const taught: string[] = [];
   const enroll = (pipeline as any).autoEnroll.bind(pipeline);
   (pipeline as any).autoEnroll = (guess: any, best: any, segs: any) => (taught.push(best.deviceId), enroll(guess, best, segs));

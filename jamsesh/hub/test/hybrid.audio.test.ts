@@ -30,7 +30,7 @@ function setup(lines: Map<number, string>) {
   s.touchDevice("felipe-laptop", { personId: felipe.id, location: "remote" });
   // Transcription is stubbed: each test clip's length maps to the words in it.
   const transcriber = { transcribe: async (wav: Uint8Array) => ({ text: lines.get(wav.length) ?? "", engine: "stub" }) } as any;
-  const p = new AudioPipeline(s, transcriber);
+  const p = new AudioPipeline(s, transcriber, () => false);
   const out: { text: string; who: string; location: string }[] = [];
   p.onLine = (u, isNew) => isNew && out.push({ text: u.text, who: u.speakerName, location: u.location });
   return { s, p, out, chey, felipe };

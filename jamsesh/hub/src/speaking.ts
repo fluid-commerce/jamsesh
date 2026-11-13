@@ -48,6 +48,12 @@ export class Speaking {
 
   /** A laptop's microphone heard speech start (`on`), carries on (`on` with a level), or ended. */
   update(deviceId: string, on: boolean, level: number) {
+    // A start from a laptop that is absent or muted is refused, and whatever it had is gone: only a fresh start after
+    // the mic is really on can show it.
+    if (on) {
+      const d = this.session.store.get("devices", deviceId);
+      if (!d || !d.micOn) return this.drop(deviceId);
+    }
     // Enforced here, whatever a client sends: a device gets this many messages a second, the rest are dropped (never queued).
     // "Speech ended" is always processed (it only ever ends something); repeated starts and level updates are limited.
     if (on) {
