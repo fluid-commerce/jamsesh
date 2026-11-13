@@ -67,3 +67,38 @@ apply to every engine.
 
 Parakeet's hotwords in sherpa-onnx need `modelingUnit: "bpe"` with a `bpeVocab` file; the model
 package has none, so the hub writes one from `tokens.txt`.
+
+## Rerun: Parakeet v3 on the GPU (2026-11-13)
+
+Parakeet TDT 0.6B v3 (Q8_0 GGUF) through transcribe.cpp on Metal, with Hex's fork rescoring the
+room's single-word terms, against whisper.cpp large-v3-turbo q5 with the vocabulary prompt, both
+through the path a room line takes (`Transcriber.transcribe`: the brain's hint, the clip's SNR, the
+room's names, then the correction pass with "Chey: Shay, Shea, Shae" and "Britt: Brit, Britton").
+The harness is `hub/test/transcription-bakeoff.bench.ts`; the 5.1 clips weren't kept, so it speaks a
+new synthetic set the same way (14 English voices, seeded noise): 22 clean room lines, 10 with pink
+noise 10 dB down, 9 with a second voice 18 dB down, 9 with room echo, 9 with look-alike words and
+none of the room's (Brett, Britain, shade, fig jam, password, parody, fluent, jam session,
+Philippe), 5 with repeated words, 10 in German, French, Spanish, Italian, Dutch, Portuguese, Polish
+and Swedish, and 3 with no speech. "Terms" counts the room's words said and written; a false
+insertion is one written that wasn't said.
+
+| Group | Clips | whisper WER | v3 WER | whisper terms | v3 terms | whisper false ins. | v3 false ins. |
+|---|---|---|---|---|---|---|---|
+| clean | 22 | 4.5% | 6.3% | 53/54 | 48/54 | 0 | 0 |
+| noise | 10 | 18.3% | 23.1% | 20/25 | 19/25 | 0 | 0 |
+| second voice | 9 | 0.0% | 11.4% | 22/22 | 19/22 | 0 | 0 |
+| echo | 9 | 12.2% | 23.3% | 22/25 | 15/25 | 0 | 0 |
+| look-alikes | 9 | 1.1% | 1.1% | - | - | 1 | 1 |
+| repeated words | 5 | 0.0% | 0.0% | 2/2 | 2/2 | 0 | 0 |
+| other languages | 10 | 4.6% | 5.7% | 10/10 | 9/10 | 1 | 1 |
+| no speech | 3 | 0 words | 0 words | - | - | 0 | 0 |
+| **all** | 77 | 6.2% | 10.3% | 129/138 | 112/138 | 2 | 2 |
+
+Median time per clip: about 150 ms for Parakeet v3, about 470 ms for whisper (one Mac, heavily
+loaded). Both wrote "Felipe" for "Philippe", and both scored one false insertion in Polish, where
+"Jonathana" (the room's name, inflected) came out "Jonathan".
+
+**Decision:** the rule for making Parakeet v3 the default was word error within one point of
+whisper's overall, term recall at least whisper's, and no more false insertions. v3 is close on
+clean speech but falls behind with noise and echo (10.3% against 6.2% overall, 81% against 93% of
+terms), so **whisper stays the default** and Parakeet v3 stays the opt-in faster engine.
