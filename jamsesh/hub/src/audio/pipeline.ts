@@ -264,7 +264,7 @@ export class AudioPipeline {
         .catch((e) => console.error("audio:", e))
         .finally(() => this.previewing.delete(p));
       this.previewing.add(p);
-    } else this.refreshPreview(g);
+    }
     return seg;
   }
 
@@ -502,16 +502,11 @@ export class AudioPipeline {
    */
   private async preview(g: Group, seg: Segment) {
     if (!speechLike(seg)) return;
-    const { text, engine } = await this.words(seg);
+    const heard = await this.words(seg);
     // The window closed while it was transcribed: the settled line comes next, straight away.
-    if (!text || !this.open.includes(g) || g.previewId || this.closed) return;
-    if (this.isCalibration(text, g)) return;
-    // Labelled, and checked against the recording exclusion, from the copy whose words these are, not from a louder
-    // copy that arrived while it was being transcribed. refreshPreview relabels as the other copies are heard.
-    const best = seg;
-    const u = this.draft(g, [seg], best, text, engine);
-    // A copy that arrived meanwhile may be the recorder's own: the early line waits for the settled one then.
-    if (this.excluded?.(u) || (g.segments.length > 1 && this.excluded?.(this.draft(g, g.segments, pickBest(g.segments), text, engine))) || this.findTwin(g, text, best, true) || this.echoOf(u, best.snr, true) === "drop") return;
+    if (!this.open.includes(g) || g.previewId || this.closed) return;
+    const u = this.earlyLine(g, seg, heard);
+    if (!u) return;
     g.previewId = u.id;
     g.preview = seg;
     this.session.previews.set(u.id, u);
@@ -519,38 +514,34 @@ export class AudioPipeline {
     this.onShown?.(u);
   }
 
-  /** What an early line says: the group's copies so far, labelled like any line. */
-  private draft(g: Group, segs: Segment[], best: Segment, text: string, engine: string, id = newId("utt")): Utterance {
-    const guess = this.identify(segs, best, !g.split);
-    return {
-      id,
-      t0: Math.min(...segs.map((s) => s.t0)),
-      t1: Math.max(...segs.map((s) => s.t1)),
+  /**
+   * THE ONE RULE FOR EARLY LINES, and the only way one is made: it shows the words, speaker and laptop of the one copy that
+   * was transcribed, and nothing changes it until the settled line replaces it (or takes it back). No later copy relabels it.
+   * Returns nothing when the settled line would drop it or hold it back: no words, the join read, speech held for a
+   * recording, an echo, a twin.
+   */
+  private earlyLine(g: Group, seg: Segment, heard: { text: string; engine: string }): Utterance | undefined {
+    const { text, engine } = heard;
+    if (!text || this.isCalibration(text, g)) return undefined;
+    const guess = this.identify([seg], seg, !g.split);
+    const u: Utterance = {
+      id: newId("utt"),
+      t0: seg.t0,
+      t1: seg.t1,
       text,
       personId: guess.personId,
       speakerName: this.session.person(guess.personId)?.name ?? "Someone",
       confidence: guess.confidence,
       method: guess.method,
-      deviceId: best.deviceId,
-      devices: segs.map((s) => ({ deviceId: s.deviceId, level: round(s.levelDb), snr: round(s.snr) })),
+      deviceId: seg.deviceId,
+      devices: [{ deviceId: seg.deviceId, level: round(seg.levelDb), snr: round(seg.snr) }],
       location: g.location,
       eventId: null,
       engine,
       settled: false,
     };
-  }
-
-  /** Another laptop's copy came in while the early line shows: who it was and which laptops heard it follow, in place. */
-  private refreshPreview(g: Group) {
-    const cur = g.previewId ? this.session.previews.get(g.previewId) : undefined;
-    if (!cur) return;
-    const next = this.draft(g, g.segments, pickBest(g.segments), cur.text, cur.engine, cur.id);
-    // A copy that turns out to be the recorder's own speech takes the early line back.
-    if (this.excluded?.(next)) return this.retract(g);
-    if (next.personId === cur.personId && next.devices.length === cur.devices.length) return;
-    this.session.previews.set(next.id, next);
-    bus.send({ type: "utterance", utterance: next });
-    this.onShown?.(next);
+    if (this.excluded?.(u) || this.findTwin(g, text, seg, true) || this.echoOf(u, seg.snr, true) === "drop") return undefined;
+    return u;
   }
 
   /** The group's early line didn't become a line (a twin, an echo, the join read, nothing heard): it goes away. */

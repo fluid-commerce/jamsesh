@@ -229,12 +229,8 @@ test("a muted mic, and a laptop the hub doesn't know, show nothing; an unnamed l
   r.speaking.update("ghost", true, -30);
   expect(r.msgs).toHaveLength(0);
   r.speaking.update("nobody", true, -30);
-  expect(r.msgs.at(-1)!.talkers).toMatchObject([{ name: "Someone", personId: null }]);
-  // A mic muted while talking goes at once.
-  r.session.touchDevice("nobody", { micOn: false });
-  r.speaking.update("nobody", true, -30);
   await Bun.sleep(250);
-  expect(r.msgs.at(-1)!.talkers).toEqual([]);
+  expect(r.msgs.at(-1)!.talkers).toMatchObject([{ name: "Someone", personId: null }]);
   r.done();
 });
 
@@ -475,7 +471,7 @@ test("the early line is labelled from the copy whose words it shows, not a loude
   r.off();
 });
 
-test("a louder copy from the recorder arriving mid-transcription doesn't put recorded speech in the feed, and the other way round", async () => {
+test("a louder copy from the recorder arriving mid-transcription never puts recorded speech in the feed's events", async () => {
   const r = await openHub("slowrec");
   try {
     const { hub } = r;
@@ -500,8 +496,6 @@ test("a louder copy from the recorder arriving mid-transcription doesn't put rec
     await hear("lap-a", 62, 1);
     release();
     await Bun.sleep(60);
-    // The recorder's copy was already known when the first copy's words came back: no early line.
-    expect(hub.session.previews.size).toBe(0);
     await hub.audio.flush();
     expect(hub.session.previews.size).toBe(0);
     expect(hub.session.store.all("utterances").every((u) => u.eventId === null)).toBe(true);
@@ -517,4 +511,37 @@ test("a burst of speaking messages that ends with 'off' ends the indicator", asy
   await Bun.sleep(300);
   expect(r.msgs.at(-1)!.talkers).toMatchObject([{ name: "Ana", live: false }]);
   r.done();
+});
+
+test("muting through registration while someone is talking clears the indicator at once", async () => {
+  const r = talk();
+  r.speaking.update("a", true, -30);
+  await Bun.sleep(250);
+  expect(r.msgs.at(-1)!.talkers).toMatchObject([{ name: "Ana", live: true }]);
+  r.session.touchDevice("a", { micOn: false });
+  await Bun.sleep(320);
+  expect(r.msgs.at(-1)!.talkers).toEqual([]);
+  r.session.touchDevice("a", { micOn: true });
+  r.speaking.update("a", true, -30);
+  await Bun.sleep(250);
+  expect(r.msgs.at(-1)!.talkers).toMatchObject([{ name: "Ana" }]);
+  r.done();
+});
+
+test("an early line is frozen: later copies, same words or other speech, never relabel it; the settled line has the right speaker", async () => {
+  const r = room();
+  const t = base();
+  await r.hear("lap-a", t, 2, "put the pricing page up", 71, 0.2);
+  await Bun.sleep(40);
+  const [early] = [...r.session.previews.values()];
+  expect(early.speakerName).toBe("Ana");
+  const snapshot = JSON.stringify(early);
+  await r.hear("lap-b", t, 2, "put the pricing page up", 72, 1);
+  await r.hear("lap-c", t + 100, 2, "I think the header is too tall", 73, 0.6);
+  await Bun.sleep(40);
+  expect(JSON.stringify(r.session.previews.get(early.id))).toBe(snapshot);
+  expect(r.utterances().filter((u) => u.id === early.id)).toHaveLength(1);
+  await r.pipeline.flush();
+  expect(r.session.store.all("utterances").find((u) => u.id === early.id)).toMatchObject({ text: "put the pricing page up", speakerName: "Bob" });
+  r.off();
 });

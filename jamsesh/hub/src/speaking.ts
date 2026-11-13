@@ -36,10 +36,15 @@ export class Speaking {
   private lastPublish = 0;
   private pending: ReturnType<typeof setTimeout> | null = null;
   private sweep: ReturnType<typeof setInterval> | null = null;
-  private last = "";
+  private last = "[]";
   private rate = new Map<string, { since: number; n: number }>();
 
-  constructor(private session: Session) {}
+  private offDevices: () => void;
+
+  constructor(private session: Session) {
+    // Anything that changes a laptop's registration (mute, a person's name, a laptop leaving) can change who is shown.
+    this.offDevices = bus.on((m) => m.type === "patch" && m.key === "devices" && this.entries.size > 0 && this.publish());
+  }
 
   /** A laptop's microphone heard speech start (`on`), carries on (`on` with a level), or ended. */
   update(deviceId: string, on: boolean, level: number) {
@@ -51,9 +56,6 @@ export class Speaking {
       if (!w || now - w.since >= 1000) this.rate.set(deviceId, { since: now, n: 1 });
       else if (++w.n > MAX_PER_SECOND) return;
     }
-    const d = this.session.store.get("devices", deviceId);
-    // A muted microphone, and a laptop the hub doesn't know, say nothing.
-    if (!d || !d.micOn) return this.drop(deviceId);
     const cur = this.entries.get(deviceId);
     const db = Number.isFinite(level) ? Math.min(0, Math.max(-100, level)) : -60;
     if (!on) {
@@ -96,6 +98,7 @@ export class Speaking {
   }
 
   stop() {
+    this.offDevices();
     for (const e of this.entries.values()) this.clearTimer(e);
     this.entries.clear();
     if (this.sweep) clearInterval(this.sweep);
@@ -122,13 +125,16 @@ export class Speaking {
     if (!this.entries.size && this.sweep) (clearInterval(this.sweep), (this.sweep = null));
   }
 
-  /** The talkers to show now. */
+  /**
+   * The talkers to show now, and the only source of the indicator. Read from live state each time: a laptop counts only while
+   * its current registration has the mic on (a muted mic, a laptop the hub forgot, or one that stopped reporting shows nothing).
+   */
   talkers(): Talker[] {
     const out: Talker[] = [];
     const room: { id: string; e: Entry }[] = [];
     for (const [id, e] of this.entries) {
       const d = this.session.store.get("devices", id);
-      if (!d) continue;
+      if (!d || !d.micOn) continue;
       if ((d.location ?? "room") === "remote") out.push(this.talker(id, e));
       else room.push({ id, e });
     }
