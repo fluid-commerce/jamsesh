@@ -3,31 +3,35 @@
 # (the shader library embedded), from Hex's fork, which adds Parakeet vocabulary rescoring to
 # transcribe.cpp 0.4.1 with the same C ABI (header hash), so the transcribe-cpp@0.4.1 binding loads
 # it in place of its prebuilt library.
-# Usage: app/build-transcribe.sh <output dir>          builds it and installs it there
-#        app/build-transcribe.sh --check <output dir>  says whether the libraries there are the pinned ones
-#        app/build-transcribe.sh --print <output dir>  builds it into <output dir> and prints its hashes, unchecked
-#                                                      (for pinning a new commit or toolchain; never bundled)
+# Usage: app/build-transcribe.sh <output dir>          builds it, installs it there, and records its hashes
+#        app/build-transcribe.sh --check <output dir>  says whether the libraries there are the recorded ones
 # transcribe.cpp and the fork are MIT (see NOTICE).
 #
-# Everything is pinned in app/transcribe-pins.json, which the hub reads too: the fork's commit, the
-# binding's header hash, and each library's SHA-256. The build is reproducible (no build paths or
-# dates in the output), so a fresh build must match those hashes or nothing is installed; the hub
-# loads only files with those hashes. The libraries are built and checked in a folder beside the
-# output and moved into place whole, so a failed build never leaves a mixed set.
+# The input is pinned in app/transcribe-pins.json: the fork's commit and the binding's header hash,
+# both checked before anything is built. The output is recorded: in the same run that builds and
+# installs the libraries, their SHA-256s are written to hub/src/audio/transcribe-pins.generated.ts
+# (gitignored). The hub loads only files with those hashes; bundle-hub.sh runs this before it
+# compiles the hub, so the app's hub carries the hashes of the app's own libraries. The build is
+# reproducible on one toolchain (no build paths or dates in the output). The libraries are built in a
+# folder beside the output and moved into place whole, so a failed build never leaves a mixed set.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PINS="$HERE/transcribe-pins.json"
-pin() { bun -e 'const p = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); const v = process.argv[2].split("/").reduce((o, k) => o?.[k], p); if (typeof v !== "string") process.exit(1); console.log(v)' "$PINS" "$1"; }
+GENERATED="$HERE/../hub/src/audio/transcribe-pins.generated.ts"
+pin() { bun -e 'const p = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); const v = p[process.argv[2]]; if (typeof v !== "string") process.exit(1); console.log(v)' "$PINS" "$1"; }
 REPO="$(pin repo)"
 COMMIT="$(pin commit)"
 ABIHASH="$(pin abihash)"
 LIBS=(libtranscribe.dylib libggml.0.dylib libggml-base.0.dylib libggml-cpu.0.dylib libggml-metal.0.dylib)
-matches() { # <dir>: every library there has its pinned SHA-256, and nothing else is there
-  [ -d "$1" ] || return 1
+recorded() { # <library>: its SHA-256 as the last build recorded it, for this commit
+  bun -e 'const m = await import(process.argv[1]); if (m.LIBRARY_COMMIT !== process.argv[2]) process.exit(1); const v = m.LIBRARY_HASHES?.[process.argv[3]]; if (typeof v !== "string") process.exit(1); console.log(v)' "$GENERATED" "$COMMIT" "$1" 2>/dev/null
+}
+matches() { # <dir>: every library there has its recorded SHA-256, and nothing else is there
+  [ -d "$1" ] && [ -f "$GENERATED" ] || return 1
   [ "$(ls -A "$1" | sort)" = "$(printf '%s\n' "${LIBS[@]}" | sort)" ] || return 1
   for l in "${LIBS[@]}"; do
     [ -f "$1/$l" ] && [ ! -L "$1/$l" ] || return 1
-    [ "$(shasum -a 256 "$1/$l" | cut -d' ' -f1)" = "$(pin "libs/$l")" ] || return 1
+    [ "$(shasum -a 256 "$1/$l" | cut -d' ' -f1)" = "$(recorded "$l")" ] || return 1
   done
 }
 
@@ -35,8 +39,6 @@ if [ "${1:-}" = "--check" ]; then
   matches "${2:?output dir}"
   exit
 fi
-PRINT=0
-if [ "${1:-}" = "--print" ]; then PRINT=1; shift; fi
 
 OUT="${1:?output dir}"
 mkdir -p "$(dirname "$OUT")"
@@ -80,16 +82,21 @@ for l in "${LIBS[@]}"; do
     exit 1
   fi
 done
-if [ "$PRINT" = 1 ]; then
-  for l in "${LIBS[@]}"; do printf '"%s": "%s",\n' "$l" "$(shasum -a 256 "$NEW/$l" | cut -d' ' -f1)"; done
-elif ! matches "$NEW"; then
-  echo "transcribe.cpp fork: this build doesn't match app/transcribe-pins.json (another compiler?); nothing installed." >&2
-  for l in "${LIBS[@]}"; do echo "  $l $(shasum -a 256 "$NEW/$l" | cut -d' ' -f1)" >&2; done
-  exit 1
-fi
 chmod 755 "$NEW"
+# The hashes of exactly what was built, taken before it moves.
+HASHES="$(for l in "${LIBS[@]}"; do printf '  "%s": "%s",\n' "$l" "$(shasum -a 256 "$NEW/$l" | cut -d' ' -f1)"; done)"
 OLD=""
 if [ -e "$OUT" ]; then OLD="$(mktemp -d "$(dirname "$OUT")/.transcribe-old.XXXXXX")" && mv "$OUT" "$OLD/x"; fi
 mv "$NEW" "$OUT"
 if [ -n "$OLD" ]; then rm -rf "$OLD"; fi
+# Record what was just installed, for the hub (written beside its name, then renamed over it).
+{
+  echo "// Generated by jamsesh/app/build-transcribe.sh when it built the libraries: don't edit, don't commit."
+  echo "// The hub loads Parakeet's library only when every file has the hash recorded here."
+  printf 'export const LIBRARY_COMMIT = "%s";\n' "$COMMIT"
+  echo "export const LIBRARY_HASHES: Record<string, string> = {"
+  echo "$HASHES"
+  echo "};"
+} >"$GENERATED.tmp"
+mv -f "$GENERATED.tmp" "$GENERATED"
 echo "transcribe.cpp ${COMMIT:0:7} (Hex fork) -> $OUT"

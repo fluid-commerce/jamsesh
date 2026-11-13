@@ -9,6 +9,11 @@ OUT="$ROOT/app/resources"
 JAM="${JAMSESH_HOME:-$HOME/.jamsesh}"
 rm -rf "$OUT" && mkdir -p "$OUT"/{hub,bin,skill,models,node_modules}
 
+# Parakeet's library (Hex's fork of transcribe.cpp, MIT, see NOTICE), built first: the build writes the
+# hashes of what it built into hub/src/audio/transcribe-pins.generated.ts, which the hub compiled next
+# carries, so the app's hub loads only these files.
+app/build-transcribe.sh "$OUT/lib/transcribe" || { echo "::error::bundle-hub: building transcribe.cpp (app/build-transcribe.sh) failed; see its output above" >&2; exit 1; }
+app/build-transcribe.sh --check "$OUT/lib/transcribe" || { echo "::error::bundle-hub: the built transcribe.cpp doesn't match the hashes it recorded" >&2; exit 1; }
 (cd hub && bun build --compile src/index.ts --outfile "$OUT/hub/jamsesh-hub" >/dev/null)
 # The PDF reader (Apple's PDFKit), built beside the hub: the hub looks for `jamsesh-pdftext` next to its own binary.
 swiftc -O -swift-version 5 hub/native/jamsesh-pdftext.swift -o "$OUT/hub/jamsesh-pdftext"
@@ -21,8 +26,6 @@ bun hub/src/emit-setup.ts "$OUT"
 # commit, straight into the bundle: a stamp beside a binary can be written by anyone, so no binary
 # found on this machine is bundled on the strength of one.
 app/build-whisper.sh "$OUT/bin"
-# Parakeet's library, from Hex's fork of transcribe.cpp (vocabulary rescoring); the hub points the binding at it.
-app/build-transcribe.sh "$OUT/lib/transcribe"
 rm -f "$OUT/bin/whisper-server.build"
 for b in figcraft-server figcraft-cli; do cp "$JAM/bin/$b" "$OUT/bin/"; done
 ARCH="$(uname -m | sed 's/x86_64/x64/')"

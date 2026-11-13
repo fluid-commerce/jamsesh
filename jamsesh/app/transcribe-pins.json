@@ -2,12 +2,5 @@
   "repo": "https://github.com/anomalyco/transcribe.cpp",
   "commit": "bcb639faa4c74a2300ba19e30360cb2355b1663a",
   "abihash": "f99ad4169374b8f3",
-  "libs": {
-    "libtranscribe.dylib": "682e4aa3530d6b3b80c9c46cd307edf974886f61139dd49603ee77c133b4b53b",
-    "libggml.0.dylib": "4961697d52e66ec5271bb89485d3719b8f4df99676d82cea2faa6b0f6832b89c",
-    "libggml-base.0.dylib": "5f69c79fddcfc07c157b8d51eaf969f17f323b85d831da352adf5a11a59b012b",
-    "libggml-cpu.0.dylib": "1ac3e246f183f2849e47de7f87d8bec93d55007e343ff2f72ff8c4624b3a0c6a",
-    "libggml-metal.0.dylib": "78acb624f321dee02e23dbe1ea4cc2c94d07cd59bcf435c125b9d57898d9a40c"
-  },
-  "note": "Built by app/build-transcribe.sh (reproducible) with Apple clang 21.0.0 (Xcode 26.6) on arm64. Another toolchain gives other bytes: rebuild with --print, check, and pin here; the hub loads only these files."
+  "note": "The source app/build-transcribe.sh builds: the fork's commit and the transcribe-cpp@0.4.1 binding's header hash. The built libraries' SHA-256s aren't pinned here (another compiler gives other bytes): the script writes them into hub/src/audio/transcribe-pins.generated.ts as it builds, and the hub compiled after it loads only those files."
 }

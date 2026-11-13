@@ -876,7 +876,13 @@ test("only the pinned whisper-server build and speaker model are installed or bu
   // The shipped whisper-server is built from the pinned commit into the bundle; a stamped binary found on
   // the machine (whose stamp anyone can rewrite) is never copied in.
   expect(bundle).toMatch(/^app\/build-whisper\.sh "\$OUT\/bin"$/m);
-  expect(bundle).not.toMatch(/--check/);
+  expect(bundle).not.toMatch(/build-whisper\.sh --check/);
+  // Parakeet's library is built (recording its hashes for the hub) and checked before the hub is compiled.
+  const build = bundle.indexOf('app/build-transcribe.sh "$OUT/lib/transcribe"');
+  const verify = bundle.indexOf('app/build-transcribe.sh --check "$OUT/lib/transcribe"');
+  const compile = bundle.indexOf("bun build --compile");
+  expect(build).toBeGreaterThan(-1);
+  expect(build < verify && verify < compile).toBe(true);
   expect(bundle).not.toMatch(/for b in [^\n]*whisper-server/);
   expect(bundle).toMatch(/!= "\$WESPEAKER_SHA256" \]; then[\s\S]*?exit 1/);
 });

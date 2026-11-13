@@ -1601,18 +1601,21 @@ In `auto` the engines are tried least-busy first, then in this order [B28]:
    keeps it off). NVIDIA's Parakeet TDT 0.6B v3 (Q8_0 GGUF, CC-BY-4.0) through transcribe.cpp (the
    `transcribe-cpp` npm package, MIT, pinned to an exact version), which runs it on the Mac's GPU
    with Metal on Apple silicon. The native library is Hex's fork of transcribe.cpp
-   (`anomalyco/transcribe.cpp`, MIT: 0.4.1 with the same C ABI plus Parakeet vocabulary rescoring),
-   pinned in `app/transcribe-pins.json` (the commit, the binding's header hash and each library's
-   SHA-256), which the hub compiles in and `app/build-transcribe.sh` reads. The build is
-   reproducible (fixed work folder, source paths mapped, archive dates zeroed) and installs nothing
-   that doesn't match the pins; it assembles the set beside the output and moves it into place whole.
-   `bundle-hub.sh` builds it into the bundle's `lib/transcribe`, `install.sh` into
-   `~/.jamsesh/lib/transcribe` (`--check` compares with the pins). Only that build loads: at every
-   start, Parakeet's process drops any `TRANSCRIBE_LIBRARY` it inherited and points the binding at a
-   verified folder: inside the Mac app, the app's own `lib/transcribe` and nothing else (the real path
-   must be inside its resources; `JAMSESH_TRANSCRIBE_LIBRARY` is ignored); in a checkout,
-   `JAMSESH_TRANSCRIBE_LIBRARY` or `~/.jamsesh/lib/transcribe`. Every pinned file must be a regular
-   file there with its pinned SHA-256 (`hub/src/audio/transcribe-lib.ts`). Otherwise Parakeet
+   (`anomalyco/transcribe.cpp`, MIT: 0.4.1 with the same C ABI plus Parakeet vocabulary rescoring).
+   The input is pinned in `app/transcribe-pins.json` (the fork's commit and the binding's header
+   hash), which `app/build-transcribe.sh` checks before it builds. The output is recorded: in the
+   same run that builds and installs the libraries, the script writes their SHA-256s to
+   `hub/src/audio/transcribe-pins.generated.ts` (gitignored). `bundle-hub.sh` runs it (then
+   `--check`) before compiling the hub, so the hub inside the signed app carries the hashes of the
+   app's own `lib/transcribe`; `install.sh` builds into `~/.jamsesh/lib/transcribe` and writes the
+   same module for a checkout. The build is reproducible on one toolchain (fixed work folder, source
+   paths mapped, archive dates zeroed) and moves the whole set into place at once. Only that build
+   loads: at every start, Parakeet's process drops any `TRANSCRIBE_LIBRARY` it inherited and points
+   the binding at a verified folder: inside the Mac app, the app's own `lib/transcribe` and nothing
+   else (the real path must be inside its resources; `JAMSESH_TRANSCRIBE_LIBRARY` is ignored); in a
+   checkout, `JAMSESH_TRANSCRIBE_LIBRARY` or `~/.jamsesh/lib/transcribe`. Every library must be a
+   regular file there with its recorded SHA-256 (`hub/src/audio/transcribe-lib.ts`); with no record
+   (the module missing), nothing loads. Otherwise Parakeet
    doesn't start, **Settings** says why, and whisper carries the room. The app bundles
    `transcribe-cpp`, its FFI library koffi and the darwin-arm64 package beside sherpa-onnx (which
    stays for voiceprints); the compiled hub finds them in its bundled `node_modules`, and the release

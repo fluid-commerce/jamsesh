@@ -6,7 +6,7 @@
 // which rescores the words Parakeet heard against the room's list.
 
 import { config } from "../config";
-import { verifiedLibrary } from "./transcribe-lib";
+import { recordedHashes, verifiedLibrary } from "./transcribe-lib";
 import { decodeWav, resample } from "./wav";
 
 /** The longest clip it decodes; the pipeline's clips are 15 s at most. */
@@ -24,7 +24,7 @@ export const MAX_TERMS = 64;
  */
 export async function loadTranscribeCpp(): Promise<typeof import("transcribe-cpp")> {
   delete process.env.TRANSCRIBE_LIBRARY;
-  process.env.TRANSCRIBE_LIBRARY = await verifiedLibrary(process.env, config.home);
+  process.env.TRANSCRIBE_LIBRARY = await verifiedLibrary(process.env, config.home, await recordedHashes());
   const where: string = config.nodeModules ? Bun.resolveSync("transcribe-cpp", config.nodeModules) : Bun.resolveSync("transcribe-cpp", import.meta.dir);
   await keepKoffiArrays(Bun.resolveSync("koffi", where));
   return await import(where);
