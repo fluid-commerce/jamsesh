@@ -828,7 +828,6 @@ export class Hub {
     // The lock goes quiet after 20 minutes untouched; a recording is somebody being there.
     if (screenId) (rec.keep = setInterval(() => s.touchLock(screenId), 60_000)).unref?.();
     this.recs.set(deviceId, rec);
-    this.audio.retractAll();
     s.setRecording({ id, deviceId, personId: rec.personId, personName: person?.name ?? "Someone", screenId, since: Date.now() });
     return { ok: true, id };
   }

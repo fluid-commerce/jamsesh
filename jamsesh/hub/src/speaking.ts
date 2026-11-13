@@ -96,7 +96,6 @@ export class Speaking {
     const cur = this.entries.get(deviceId);
     if (!cur) return;
     this.clearTimer(cur);
-    this.rate.delete(deviceId);
     this.entries.delete(deviceId);
     this.publish();
   }
