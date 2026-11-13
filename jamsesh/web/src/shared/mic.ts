@@ -288,7 +288,30 @@ export function isEchoSegment(level: number, noise: number, suppressing: boolean
   return suppressing && level < noise + BARGE_MARGIN_DB;
 }
 
+/** How often a talking mic tells the room its level: five times a second at most. */
+export const TALK_EVERY_MS = 200;
+
+/**
+ * What a microphone tells the room about someone talking: one message when speech starts, one when it ends, and a coarse
+ * level (the loudest frame since the last message) five times a second between. Nothing while it is quiet.
+ */
+export class TalkSignal {
+  private on = false;
+  private at = 0;
+  private peak = -100;
+  step(speaking: boolean, db: number, now: number): { on: boolean; level: number } | null {
+    this.peak = Math.max(this.peak, db);
+    if (speaking === this.on && !(speaking && now - this.at >= TALK_EVERY_MS)) return null;
+    const out = { on: speaking, level: speaking ? Math.round(this.peak) : -90 };
+    this.on = speaking;
+    this.at = now;
+    this.peak = -100;
+    return out;
+  }
+}
+
 export class Mic {
+  private talk = new TalkSignal();
   status: MicStatus = { on: false, level: -90, noise: -70, speaking: false, sent: 0, error: null, deviceLabel: "", buffered: audioBuffer.get().seconds };
   private ctx: AudioContext | null = null;
   private stream: MediaStream | null = null;
@@ -506,6 +529,9 @@ export class Mic {
     this.ctx = null;
     this.stream = null;
     this.seg = null;
+    // A muted or lost microphone is not talking.
+    const ended = this.talk.step(false, -90, Date.now());
+    if (ended) hub.send({ type: "speaking", ...ended });
     if (this.watchdog) clearInterval(this.watchdog);
     this.watchdog = null;
   }
@@ -579,6 +605,11 @@ export class Mic {
       } else this.silence++;
       if (this.silence >= END_SILENCE_FRAMES || this.seg.length >= MAX_FRAMES) this.finish(ts);
     }
+
+    // Speech has started (or ended): the room's windows say who is talking now, not when the sentence has been heard.
+    // The brain's own voice coming back through the speakers is not a person.
+    const heard = this.talk.step(!!this.seg && Date.now() >= this.suppressUntil, db, Date.now());
+    if (heard) hub.send({ type: "speaking", ...heard });
 
     if (Date.now() - this.lastLevelSent > 200) {
       this.lastLevelSent = Date.now();
