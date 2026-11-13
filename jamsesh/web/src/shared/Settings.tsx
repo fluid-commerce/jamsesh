@@ -150,7 +150,7 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
 
           <Saved />
 
-          <Section title="Transcription" help="The faster engine (Parakeet, on the host's GPU) goes first in the languages it knows. Whisper runs on the host for the rest, then on laptops that offer theirs. The gateway is the fallback.">
+          <Section title="Transcription" help="Whisper runs on the host, then on laptops that offer theirs. The gateway is the fallback. The faster engine, when on, goes first in the languages it knows.">
             <select value={s.transcription} onChange={(e) => update({ transcription: e.target.value as S["transcription"] })} style={{ marginBottom: 12 }}>
               <option value="auto">Local first, gateway fallback</option>
               <option value="local">Local only</option>
@@ -173,7 +173,7 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
             )}
             {host && (
               <div className="row between" style={{ marginTop: 12 }}>
-                <span>Faster engine (25 European languages, runs on the GPU, downloads 740 MB)</span>
+                <span>Faster engine (less accurate than whisper; 25 European languages, runs on the GPU, downloads 740 MB)</span>
                 <Toggle on={s.fastEngine} onChange={(v) => update({ fastEngine: v })} label="Faster engine" />
               </div>
             )}

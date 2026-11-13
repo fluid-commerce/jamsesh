@@ -1,10 +1,11 @@
 // Parakeet (5.2): NVIDIA's Parakeet TDT 0.6B v3 speech model (25 European languages), the host's
-// default engine (Settings > Transcription > Faster engine, on unless the room turns it off). It runs
-// through transcribe.cpp (the `transcribe-cpp` package) on the Mac's GPU (Metal). The model (740 MB,
-// one GGUF file) is downloaded the first time a host needs it, into ~/.jamsesh/models, and checked
-// against a pinned size and hash; whisper.cpp or the gateway carry the room until it's ready. It runs
-// in a child process (stt-server.ts): a decode never blocks the hub, and its memory goes back when
-// the hub stops.
+// opt-in faster engine (Settings > Transcription > Faster engine; whisper.cpp is the default, as it
+// was more accurate in the bake-off: docs/transcription-bakeoff.md). It runs through transcribe.cpp
+// (the `transcribe-cpp` package) on the Mac's GPU (Metal). The model (740 MB, one GGUF file) is
+// downloaded the first time a host turns it on, into ~/.jamsesh/models, and checked against a
+// pinned size and hash; whisper.cpp or the gateway carry the room until it's ready. It runs in a
+// child process (stt-server.ts): a decode never blocks the hub, and its memory goes back when the
+// hub stops.
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";

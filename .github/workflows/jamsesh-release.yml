@@ -103,6 +103,8 @@ jobs:
           HUB="$APP/Contents/Resources/jamsesh/hub/jamsesh-hub"
           # Parakeet's speech library loads from the bundle: the binding from its node_modules, the
           # library from Hex's fork (lib/transcribe), not the binding's own copy or the build tree.
+          # This checks loading only (no model is loaded, no audio decoded); transcription accuracy
+          # is the bake-off's job (jamsesh/hub/test/transcription-bakeoff.bench.ts), not this step's.
           JAMSESH_HOME="$RUNNER_TEMP/hubhome" JAMSESH_RESOURCES="$APP/Contents/Resources/jamsesh" "$HUB" --stt-check | tee "$RUNNER_TEMP/stt-check.json"
           grep -q '"library":"[^"]*/Contents/Resources/jamsesh/lib/transcribe/libtranscribe.dylib"' "$RUNNER_TEMP/stt-check.json"
           JAMSESH_PORT=4799 JAMSESH_DATA="$RUNNER_TEMP/hubdata" JAMSESH_HOME="$RUNNER_TEMP/hubhome" JAMSESH_OFFLINE=1 \

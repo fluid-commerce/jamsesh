@@ -78,7 +78,7 @@ whisper.cpp (JamSesh for Mac)
 The JamSesh Mac app bundles whisper-server from whisper.cpp v1.8.4
 (https://github.com/ggml-org/whisper.cpp), built by jamsesh/app/build-whisper.sh with ggml
 linked statically. Its speech model is not bundled: the app downloads ggml-large-v3-turbo-q5_0
-(OpenAI Whisper weights, MIT) on a Mac's first host session. The faster engine (on by default)
+(OpenAI Whisper weights, MIT) on a Mac's first host session. The opt-in faster engine
 downloads NVIDIA's Parakeet TDT 0.6B v3 (CC-BY-4.0, https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3),
 as the GGUF conversion published by handy-computer (https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf),
 and runs it with transcribe.cpp.

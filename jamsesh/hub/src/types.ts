@@ -663,7 +663,7 @@ export interface Settings {
   hostControl: boolean;
   /** Spoken language for transcription: an ISO code ("en" by default) or "auto". */
   language: string;
-  /** The faster engine (Parakeet TDT 0.6B v3 on the GPU, 25 European languages, a 740 MB download): on unless the room turns it off. */
+  /** The opt-in faster engine (Parakeet TDT 0.6B v3 on the GPU, 25 European languages, a 740 MB download). Off by default: whisper was more accurate in the bake-off. */
   fastEngine: boolean;
   /** The room's words for transcription (5.2): "Term" or "Term: heard as, heard as" ("Chey: Shay"). */
   vocabulary: string[];
