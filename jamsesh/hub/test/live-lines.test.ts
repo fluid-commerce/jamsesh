@@ -453,3 +453,68 @@ test("an agent's initial state and /state go through the same filter", () => {
   expect((forAgent({ type: "patch", key: "utterances", value: list }) as any).value.map((u: any) => u.id)).toEqual(["b"]);
   expect(forAgent({ type: "utterance-retracted", id: "a" })).toBeNull();
 });
+
+test("the early line is labelled from the copy whose words it shows, not a louder copy that arrived while it was transcribed", async () => {
+  const r = room();
+  const t = base();
+  let release = () => {};
+  const gate = new Promise<void>((res) => (release = res));
+  const inner = (r.pipeline as any).transcriber.transcribe;
+  (r.pipeline as any).transcriber = { transcribe: async (wav: Uint8Array, ...rest: any[]) => (await gate, inner(wav, ...rest)) };
+  // Ana's laptop is far (quiet) and is heard first; Bob's, much louder, arrives while her copy is still being transcribed.
+  await r.hear("lap-a", t, 2, "put the pricing page up", 51, 0.2);
+  await r.hear("lap-b", t, 2, "put the pricing page up", 52, 1);
+  release();
+  await Bun.sleep(60);
+  const early = [...r.session.previews.values()];
+  expect(early).toHaveLength(1);
+  expect(early[0].speakerName).toBe("Ana");
+  expect(early[0].devices.map((d) => d.deviceId)).toEqual(["lap-a"]);
+  await r.pipeline.flush();
+  expect(r.session.store.all("utterances")[0].speakerName).toBe("Bob");
+  r.off();
+});
+
+test("a louder copy from the recorder arriving mid-transcription doesn't put recorded speech in the feed, and the other way round", async () => {
+  const r = await openHub("slowrec");
+  try {
+    const { hub } = r;
+    const ana = hub.session.upsertPerson({ name: "Ana" });
+    for (const id of ["lap-a", "lap-b", "lap-c"]) hub.session.touchDevice(id, { label: id, micOn: true, location: "room", kind: "client" });
+    hub.session.touchDevice("lap-a", { personId: ana.id });
+    const said = new Map<string, string>();
+    stub(hub, said);
+    let release = () => {};
+    const gate = new Promise<void>((res) => (release = res));
+    const inner = (hub.audio as any).transcriber.transcribe;
+    (hub.audio as any).transcriber = { transcribe: async (wav: Uint8Array, ...rest: any[]) => (await gate, inner(wav, ...rest)) };
+    const t = base();
+    hub.promptStart("lap-a", t - 5000);
+    const hear = async (dev: string, seed: number, gain: number) => {
+      const wav = encodeWav({ sampleRate: 16000, samples: speech(2, seed, gain) });
+      said.set(String(Bun.hash(wav)), "make the header bigger");
+      await hub.audio.ingest({ deviceId: dev, t0: t, t1: t + 2000, wav });
+    };
+    // Someone else's far laptop is transcribed first; the recorder's own, louder copy arrives meanwhile.
+    await hear("lap-c", 61, 0.2);
+    await hear("lap-a", 62, 1);
+    release();
+    await Bun.sleep(60);
+    // The recorder's copy was already known when the first copy's words came back: no early line.
+    expect(hub.session.previews.size).toBe(0);
+    await hub.audio.flush();
+    expect(hub.session.previews.size).toBe(0);
+    expect(hub.session.store.all("utterances").every((u) => u.eventId === null)).toBe(true);
+  } finally {
+    r.stop();
+  }
+});
+
+test("a burst of speaking messages that ends with 'off' ends the indicator", async () => {
+  const r = talk();
+  for (let i = 0; i < 40; i++) r.speaking.update("a", true, -30);
+  r.speaking.update("a", false, -90);
+  await Bun.sleep(300);
+  expect(r.msgs.at(-1)!.talkers).toMatchObject([{ name: "Ana", live: false }]);
+  r.done();
+});

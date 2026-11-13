@@ -506,9 +506,12 @@ export class AudioPipeline {
     // The window closed while it was transcribed: the settled line comes next, straight away.
     if (!text || !this.open.includes(g) || g.previewId || this.closed) return;
     if (this.isCalibration(text, g)) return;
-    const best = pickBest(g.segments);
-    const u = this.draft(g, best, text, engine);
-    if (this.excluded?.(u) || this.findTwin(g, text, best, true) || this.echoOf(u, best.snr, true) === "drop") return;
+    // Labelled, and checked against the recording exclusion, from the copy whose words these are, not from a louder
+    // copy that arrived while it was being transcribed. refreshPreview relabels as the other copies are heard.
+    const best = seg;
+    const u = this.draft(g, [seg], best, text, engine);
+    // A copy that arrived meanwhile may be the recorder's own: the early line waits for the settled one then.
+    if (this.excluded?.(u) || (g.segments.length > 1 && this.excluded?.(this.draft(g, g.segments, pickBest(g.segments), text, engine))) || this.findTwin(g, text, best, true) || this.echoOf(u, best.snr, true) === "drop") return;
     g.previewId = u.id;
     g.preview = seg;
     this.session.previews.set(u.id, u);
@@ -517,19 +520,19 @@ export class AudioPipeline {
   }
 
   /** What an early line says: the group's copies so far, labelled like any line. */
-  private draft(g: Group, best: Segment, text: string, engine: string, id = newId("utt")): Utterance {
-    const guess = this.identify(g.segments, best, !g.split);
+  private draft(g: Group, segs: Segment[], best: Segment, text: string, engine: string, id = newId("utt")): Utterance {
+    const guess = this.identify(segs, best, !g.split);
     return {
       id,
-      t0: g.t0,
-      t1: g.t1,
+      t0: Math.min(...segs.map((s) => s.t0)),
+      t1: Math.max(...segs.map((s) => s.t1)),
       text,
       personId: guess.personId,
       speakerName: this.session.person(guess.personId)?.name ?? "Someone",
       confidence: guess.confidence,
       method: guess.method,
       deviceId: best.deviceId,
-      devices: g.segments.map((s) => ({ deviceId: s.deviceId, level: round(s.levelDb), snr: round(s.snr) })),
+      devices: segs.map((s) => ({ deviceId: s.deviceId, level: round(s.levelDb), snr: round(s.snr) })),
       location: g.location,
       eventId: null,
       engine,
@@ -541,7 +544,9 @@ export class AudioPipeline {
   private refreshPreview(g: Group) {
     const cur = g.previewId ? this.session.previews.get(g.previewId) : undefined;
     if (!cur) return;
-    const next = this.draft(g, pickBest(g.segments), cur.text, cur.engine, cur.id);
+    const next = this.draft(g, g.segments, pickBest(g.segments), cur.text, cur.engine, cur.id);
+    // A copy that turns out to be the recorder's own speech takes the early line back.
+    if (this.excluded?.(next)) return this.retract(g);
     if (next.personId === cur.personId && next.devices.length === cur.devices.length) return;
     this.session.previews.set(next.id, next);
     bus.send({ type: "utterance", utterance: next });

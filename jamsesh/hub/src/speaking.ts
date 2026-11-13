@@ -44,10 +44,13 @@ export class Speaking {
   /** A laptop's microphone heard speech start (`on`), carries on (`on` with a level), or ended. */
   update(deviceId: string, on: boolean, level: number) {
     // Enforced here, whatever a client sends: a device gets this many messages a second, the rest are dropped (never queued).
-    const now = Date.now();
-    const w = this.rate.get(deviceId);
-    if (!w || now - w.since >= 1000) this.rate.set(deviceId, { since: now, n: 1 });
-    else if (++w.n > MAX_PER_SECOND) return;
+    // "Speech ended" is always processed (it only ever ends something); repeated starts and level updates are limited.
+    if (on) {
+      const now = Date.now();
+      const w = this.rate.get(deviceId);
+      if (!w || now - w.since >= 1000) this.rate.set(deviceId, { since: now, n: 1 });
+      else if (++w.n > MAX_PER_SECOND) return;
+    }
     const d = this.session.store.get("devices", deviceId);
     // A muted microphone, and a laptop the hub doesn't know, say nothing.
     if (!d || !d.micOn) return this.drop(deviceId);
