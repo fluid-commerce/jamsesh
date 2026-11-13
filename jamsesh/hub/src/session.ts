@@ -222,7 +222,7 @@ export class Session {
       hostControl: s.setting("hostControl", true),
       language: s.setting("language", "en"),
       vocabulary: cleanVocabulary(s.setting<unknown>("vocabulary", [])),
-      fastEngine: s.setting<unknown>("fastEngine", false) === true,
+      fastEngine: s.setting<unknown>("fastEngine", true) === true,
       gatewayKeySet: keyInSettings || !!config.envGatewayKey,
       gatewayKeySource: keyInSettings ? "settings" : config.envGatewayKey ? "env" : "none",
     };

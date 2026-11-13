@@ -23,7 +23,15 @@ bun hub/src/emit-setup.ts "$OUT"
 app/build-whisper.sh "$OUT/bin"
 rm -f "$OUT/bin/whisper-server.build"
 for b in figcraft-server figcraft-cli; do cp "$JAM/bin/$b" "$OUT/bin/"; done
-cp -R node_modules/sherpa-onnx-node "node_modules/sherpa-onnx-darwin-$(uname -m | sed 's/x86_64/x64/')" "$OUT/node_modules/"
+ARCH="$(uname -m | sed 's/x86_64/x64/')"
+cp -R node_modules/sherpa-onnx-node "node_modules/sherpa-onnx-darwin-$ARCH" "$OUT/node_modules/"
+# Parakeet (audio/stt-server.ts): transcribe.cpp's bindings, koffi (the FFI library they load it
+# through) with its prebuilt addon, and the native library (Metal on Apple silicon).
+TC_NATIVE="darwin-$ARCH-$([ "$ARCH" = arm64 ] && echo metal || echo cpu)"
+mkdir -p "$OUT/node_modules/@transcribe-cpp" "$OUT/node_modules/@koromix"
+cp -R node_modules/transcribe-cpp node_modules/koffi "$OUT/node_modules/"
+cp -R "node_modules/@transcribe-cpp/$TC_NATIVE" "$OUT/node_modules/@transcribe-cpp/"
+cp -R "node_modules/@koromix/koffi-darwin-$ARCH" "$OUT/node_modules/@koromix/"
 # The speaker model ships only as the pinned file (the same pin as install.sh).
 WESPEAKER_SHA256=e9848563da86f263117134dfd7ad63c92355b37de492b55e325400c9d9c39012
 if [ "$(shasum -a 256 "$JAM/models/wespeaker_en.onnx" 2>/dev/null | cut -d' ' -f1)" != "$WESPEAKER_SHA256" ]; then
