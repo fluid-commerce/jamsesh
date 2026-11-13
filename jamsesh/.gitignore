@@ -2,3 +2,4 @@ node_modules/
 web/dist/
 *.log
 *.bun-build
+hub/src/audio/transcribe-pins.generated.ts

@@ -1,4 +1,4 @@
-// whisper.cpp on the host (5.2), the default engine. The Mac app ships `whisper-server` (built by
+// whisper.cpp on the host (5.2), the fallback engine and the one for languages Parakeet lacks. The Mac app ships `whisper-server` (built by
 // app/build-whisper.sh, MIT); the model (574 MB) is downloaded on a Mac's first host session into
 // ~/.jamsesh/models, checked against a pinned SHA-256, while the gateway covers the room. A model
 // already in ~/.cache/whisper-cpp, or Homebrew's whisper-server, is used when found. The pinned model

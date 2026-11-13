@@ -1,0 +1,6 @@
+{
+  "repo": "https://github.com/anomalyco/transcribe.cpp",
+  "commit": "bcb639faa4c74a2300ba19e30360cb2355b1663a",
+  "abihash": "f99ad4169374b8f3",
+  "note": "The source app/build-transcribe.sh builds: the fork's commit and the transcribe-cpp@0.4.1 binding's header hash. The built libraries' SHA-256s aren't pinned here (another compiler gives other bytes): the script writes them into hub/src/audio/transcribe-pins.generated.ts as it builds, and the hub compiled after it loads only those files."
+}

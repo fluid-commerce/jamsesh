@@ -21,6 +21,9 @@ if jamsesh/app/build-whisper.sh --check "$HOME_DIR/bin"; then ok "whisper-server
 elif command -v cmake >/dev/null && [ "$(uname -s)" = Darwin ]; then jamsesh/app/build-whisper.sh "$HOME_DIR/bin" >/dev/null && ok "Built whisper-server"
 elif command -v whisper-server >/dev/null; then ok "whisper-server (Homebrew)"
 else warn "No whisper-server (needs cmake to build): transcription will use the gateway"; fi
+if jamsesh/app/build-transcribe.sh --check "$HOME_DIR/lib/transcribe"; then ok "transcribe.cpp (Hex fork)"
+elif command -v cmake >/dev/null && [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then jamsesh/app/build-transcribe.sh "$HOME_DIR/lib/transcribe" >/dev/null && ok "Built transcribe.cpp (Hex fork)"
+else warn "No transcribe.cpp fork (needs cmake on Apple silicon): Parakeet won't be biased toward the room's words"; fi
 
 step "Building FigCraft (server, CLI, desktop app)"
 cargo build --release -p figcraft-server -p figcraft-cli -p figcraft

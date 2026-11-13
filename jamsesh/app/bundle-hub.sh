@@ -9,6 +9,11 @@ OUT="$ROOT/app/resources"
 JAM="${JAMSESH_HOME:-$HOME/.jamsesh}"
 rm -rf "$OUT" && mkdir -p "$OUT"/{hub,bin,skill,models,node_modules}
 
+# Parakeet's library (Hex's fork of transcribe.cpp, MIT, see NOTICE), built first: the build writes the
+# hashes of what it built into hub/src/audio/transcribe-pins.generated.ts, which the hub compiled next
+# carries, so the app's hub loads only these files.
+app/build-transcribe.sh "$OUT/lib/transcribe" || { echo "::error::bundle-hub: building transcribe.cpp (app/build-transcribe.sh) failed; see its output above" >&2; exit 1; }
+app/build-transcribe.sh --check "$OUT/lib/transcribe" || { echo "::error::bundle-hub: the built transcribe.cpp doesn't match the hashes it recorded" >&2; exit 1; }
 (cd hub && bun build --compile src/index.ts --outfile "$OUT/hub/jamsesh-hub" >/dev/null)
 # The PDF reader (Apple's PDFKit), built beside the hub: the hub looks for `jamsesh-pdftext` next to its own binary.
 swiftc -O -swift-version 5 hub/native/jamsesh-pdftext.swift -o "$OUT/hub/jamsesh-pdftext"
@@ -23,7 +28,15 @@ bun hub/src/emit-setup.ts "$OUT"
 app/build-whisper.sh "$OUT/bin"
 rm -f "$OUT/bin/whisper-server.build"
 for b in figcraft-server figcraft-cli; do cp "$JAM/bin/$b" "$OUT/bin/"; done
-cp -R node_modules/sherpa-onnx-node "node_modules/sherpa-onnx-darwin-$(uname -m | sed 's/x86_64/x64/')" "$OUT/node_modules/"
+ARCH="$(uname -m | sed 's/x86_64/x64/')"
+cp -R node_modules/sherpa-onnx-node "node_modules/sherpa-onnx-darwin-$ARCH" "$OUT/node_modules/"
+# Parakeet (audio/stt-server.ts): transcribe.cpp's bindings, koffi (the FFI library they load it
+# through) with its prebuilt addon, and the native library (Metal on Apple silicon).
+TC_NATIVE="darwin-$ARCH-$([ "$ARCH" = arm64 ] && echo metal || echo cpu)"
+mkdir -p "$OUT/node_modules/@transcribe-cpp" "$OUT/node_modules/@koromix"
+cp -R node_modules/transcribe-cpp node_modules/koffi "$OUT/node_modules/"
+cp -R "node_modules/@transcribe-cpp/$TC_NATIVE" "$OUT/node_modules/@transcribe-cpp/"
+cp -R "node_modules/@koromix/koffi-darwin-$ARCH" "$OUT/node_modules/@koromix/"
 # The speaker model ships only as the pinned file (the same pin as install.sh).
 WESPEAKER_SHA256=e9848563da86f263117134dfd7ad63c92355b37de492b55e325400c9d9c39012
 if [ "$(shasum -a 256 "$JAM/models/wespeaker_en.onnx" 2>/dev/null | cut -d' ' -f1)" != "$WESPEAKER_SHA256" ]; then

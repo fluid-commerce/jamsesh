@@ -127,7 +127,7 @@ test("installed Parakeet files are checked against what was verified at install;
   await writeManifest(where);
   expect(Object.keys(JSON.parse(readFileSync(join(where, ".files.sha256.json"), "utf8")))).toEqual(PARAKEET.files);
   expect(await installedIntact(where)).toBe(true);
-  writeFileSync(join(where, PARAKEET.files[1]), "swapped");
+  writeFileSync(join(where, PARAKEET.files[0]), "swapped");
   expect(await installedIntact(where)).toBe(false);
   // A folder the person chose (or the app bundle) isn't second-guessed; a fresh install is recorded from the verified archive.
   expect(await installedIntact(where, false)).toBe(true);

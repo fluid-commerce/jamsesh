@@ -11,6 +11,12 @@ import { linkSecretFile } from "./projects";
 
 // The compiled hub is also the host's speech model process (audio/parakeet.ts); that never returns.
 if (process.argv[2] === "--stt-server") await (await import("./audio/stt-server")).runSttServer(process.argv[3] ?? "");
+// A check of the speech library in a release build: `jamsesh-hub --stt-check` loads transcribe.cpp from the bundle and prints its version, the library it loaded and the devices.
+if (process.argv[2] === "--stt-check") {
+  const tc = await (await import("./audio/stt-server")).loadTranscribeCpp();
+  console.log(JSON.stringify({ ...tc.version(), library: tc.libraryPath(), devices: (await tc.getAvailableBackendsAsync()).map((d) => `${d.kind}:${d.description}`) }));
+  process.exit(0);
+}
 const args = new Set(process.argv.slice(2));
 // A check of the PDF reader in a release build: `jamsesh-hub --pdf-text <file>` prints what the helper reads from it.
 if (process.argv[2] === "--pdf-text" && process.argv[3]) {

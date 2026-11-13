@@ -78,9 +78,44 @@ whisper.cpp (JamSesh for Mac)
 The JamSesh Mac app bundles whisper-server from whisper.cpp v1.8.4
 (https://github.com/ggml-org/whisper.cpp), built by jamsesh/app/build-whisper.sh with ggml
 linked statically. Its speech model is not bundled: the app downloads ggml-large-v3-turbo-q5_0
-(OpenAI Whisper weights, MIT) on a Mac's first host session. The optional faster engine downloads
-NVIDIA's Parakeet TDT 0.6B v2 (CC-BY-4.0, https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2) and
-runs it with sherpa-onnx (Apache-2.0).
+(OpenAI Whisper weights, MIT) on a Mac's first host session. The faster engine (on by default)
+downloads NVIDIA's Parakeet TDT 0.6B v3 (CC-BY-4.0, https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3),
+as the GGUF conversion published by handy-computer (https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf),
+and runs it with transcribe.cpp.
+
+transcribe.cpp (JamSesh for Mac)
+--------------------------------
+The JamSesh Mac app bundles the transcribe-cpp npm package 0.4.1 (MIT, The transcribe.cpp authors,
+https://github.com/handy-computer/transcribe.cpp) and its FFI library koffi 3.3.8 (MIT, Niels
+Martignène, https://github.com/Koromix/koffi), unmodified, and libtranscribe with its ggml libraries
+built by jamsesh/app/build-transcribe.sh from Hex's fork of transcribe.cpp
+(https://github.com/anomalyco/transcribe.cpp, commit bcb639faa4c74a2300ba19e30360cb2355b1663a,
+MIT): transcribe.cpp 0.4.1 plus Hex's Parakeet vocabulary rescoring. ggml is MIT (The ggml
+authors); miniz is MIT. sherpa-onnx (Apache-2.0) stays for voiceprints.
+
+transcribe.cpp's MIT licence:
+
+MIT License
+
+Copyright (c) 2026 The transcribe.cpp authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 whisper.cpp's MIT licence:
 
