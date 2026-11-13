@@ -1600,10 +1600,18 @@ In `auto` the engines are tried least-busy first, then in this order [B28]:
    `fastEngine` setting, host only, kept across sessions (unset means on; a room that turned it off
    keeps it off). NVIDIA's Parakeet TDT 0.6B v3 (Q8_0 GGUF, CC-BY-4.0) through transcribe.cpp (the
    `transcribe-cpp` npm package, MIT, pinned to an exact version), which runs it on the Mac's GPU
-   with Metal on Apple silicon (the CPU elsewhere). The app bundles `transcribe-cpp`, its FFI library
-   koffi and the darwin-arm64 Metal library beside sherpa-onnx (which stays for voiceprints); the
-   compiled hub finds them in its bundled `node_modules` at run time, and the release build checks
-   they load (`jamsesh-hub --stt-check`). On the first host session it downloads the model once (one
+   with Metal on Apple silicon (the CPU elsewhere). The native library is Hex's fork of transcribe.cpp
+   (`anomalyco/transcribe.cpp` at commit `bcb639fa`, MIT: 0.4.1 with the same C ABI plus Parakeet
+   vocabulary rescoring), built by `app/build-transcribe.sh` for arm64 with Metal (it checks the
+   commit and the binding's header hash, and stamps the libraries' SHA-256s) into the bundle's
+   `lib/transcribe`; the hub points the binding at it (`TRANSCRIBE_LIBRARY`). Found in order:
+   `JAMSESH_TRANSCRIBE_LIBRARY`, the app bundle, `~/.jamsesh/lib/transcribe` (`install.sh` builds it
+   there); without it Parakeet runs on the binding's own library, unbiased. The app bundles
+   `transcribe-cpp`, its FFI library koffi and the darwin-arm64 package beside sherpa-onnx (which
+   stays for voiceprints); the compiled hub finds them in its bundled `node_modules` at run time, and
+   the release build checks they load and that the library is the fork's (`jamsesh-hub --stt-check`).
+   Under Bun a garbage-collected koffi type aborts the process, so the hub makes each word-list array
+   type once and keeps it. On the first host session it downloads the model once (one
    GGUF file from Hugging Face, `handy-computer/parakeet-tdt-0.6b-v3-gguf` at a fixed revision,
    checked against a pinned size and SHA-256 by the same code as whisper's) into
    `~/.jamsesh/models/parakeet-tdt-0.6b-v3-q8_0`, with progress in Settings, while the engines below
@@ -1618,9 +1626,10 @@ In `auto` the engines are tried least-busy first, then in this order [B28]:
    `JAMSESH_PARAKEET_DIR` points at a folder holding the GGUF elsewhere. The managed copy's files are checked against
    the SHA-256 list written at install before every start, whatever spelling or link of its path
    found it; a changed file means the copy is moved aside (kept, never deleted: it may be someone's own model) and downloaded again where allowed.
-   On an M4 Max it transcribes a 2.5 s line in about 0.03 s and an 8.4 s one in about 0.06 s
-   (`hub/test/parakeet-engines.bench.ts`), against 0.07 s and 0.20 s for the v2 int8 model on the CPU
-   it replaced, and 0.26 s and 0.29 s for whisper.
+   On an M4 Max it transcribes a 3.6 s line in about 0.035 s and an 8.3 s one in about 0.057 s
+   (0.05 s and 0.08 s with the room's words, which rescoring costs only when a span looks like one of
+   them; `hub/test/parakeet-engines.bench.ts`), against 0.09 s and 0.20 s for the v2 int8 model on the
+   CPU it replaced, and 0.26 s and 0.29 s for whisper.
 2. **Host whisper.cpp, the fallback and the engine for other languages** (`whisper-server` on `127.0.0.1:8178`, or
    `JAMSESH_WHISPER_PORT`). A server already answering there is used only if it transcribes half a
    second of silence like whisper-server (a `text` in JSON), and is never stopped by the hub; anything
@@ -1671,9 +1680,13 @@ names, the brain's names, active workstream titles, glossary terms, and the room
 (**Settings > Transcription > Words to listen for**, the `vocabulary` setting, kept across
 sessions). A line in that list is a word ("FigCraft") or a word and how it gets misheard
 ("Chey: Shay"). Parakeet's process takes the list as hotwords and passes it to the model as its
-vocabulary when the model takes one (`supports("vocabulary")`; transcribe.cpp's Parakeet takes none
-today, so for it the correction pass does the work); whisper.cpp and the gateway get it as their
-prompt after the brain's name. Because primed engines repeat their words on near-silence, a line
+vocabulary when the model takes one (`supports("vocabulary")`, true with Hex's fork): one spelling
+per term, the first 64 (people, then agents, the brain's names, the room's list, glossary,
+workstreams), at the fork's default strength (2.5 nats per piece). After its greedy decode the fork
+finds spans of 1 to 4 words that look or sound like a term and writes the term where the audio
+scores it within that boost of what was heard; a clip without such a span is unchanged. The
+"heard as" spellings aren't passed (the 0.4.1 binding has no way to), so the correction pass fixes
+those. whisper.cpp and the gateway get the list as their prompt after the brain's name. Because primed engines repeat their words on near-silence, a line
 made of nothing but the room's words is dropped when the audio says it was weak (under 15 dB SNR)
 or it repeats one word ("Pat. Pat. Pat."). A clean "Chey, Passport." is someone talking, and kept.
 
