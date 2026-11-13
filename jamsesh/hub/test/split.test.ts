@@ -208,8 +208,9 @@ test("a copy that arrives while its line is still being transcribed waits for it
   for (const [late, want] of [["I think the header is too tall.", 2], ["Put the pricing page up.", 1]] as const) {
     const r = room(["lap-a", "lap-b"]);
     const t0 = t();
-    await r.hear("lap-a", t0, mix(35, [A(3), 1], [B(3), 0.3]), "Put the pricing page up.");
+    // Whisper is slow from the first copy on (its first transcription starts as the copy arrives).
     const release = r.hold();
+    await r.hear("lap-a", t0, mix(35, [A(3), 1], [B(3), 0.3]), "Put the pricing page up.");
     const flushed = r.pipeline.flush();
     const arriving = r.hear("lap-b", t0, mix(36, [B(3), late.startsWith("Put") ? 0 : 1], [A(3), late.startsWith("Put") ? 0.6 : 0.3]), late);
     await Bun.sleep(20);

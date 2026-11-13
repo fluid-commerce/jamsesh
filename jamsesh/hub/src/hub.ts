@@ -4,6 +4,7 @@ import { HelperRegistry } from "./children";
 import { mkdirSync, realpathSync, rmSync } from "node:fs";
 import { join, normalize, sep } from "node:path";
 import { AudioPipeline } from "./audio/pipeline";
+import { Speaking } from "./speaking";
 import { Transcriber } from "./audio/transcribe";
 import { learningNote, voiceprintStatus, type Learning } from "./audio/voiceprint";
 import { decodeWav, resample } from "./audio/wav";
@@ -113,6 +114,8 @@ export class Hub {
   brain: Brain;
   transcriber: Transcriber;
   audio: AudioPipeline;
+  /** Who is talking right now, for the windows' indicator. Display only: not stored, not sent to agents. */
+  speaking: Speaking;
   canvas: Canvas;
   devproxy: DevProxy;
   mcp: McpEndpoint;
@@ -198,6 +201,8 @@ export class Hub {
     this.transcriber = new Transcriber(this.session, this.helpers);
     this.audio = new AudioPipeline(this.session, this.transcriber);
     this.audio.track = (work) => this.track("speech being transcribed", work);
+    this.speaking = new Speaking(this.session);
+    this.audio.onShown = (u) => this.speaking.lineShown(u);
     this.canvas = new Canvas(this.session, this.helpers, dir);
     this.fonts = new FontService(() => this.session.agents(), (id) => this.session.person(id)?.name);
     this.session.fonts = () => this.fonts.state();
@@ -391,6 +396,7 @@ export class Hub {
     const docs = !unfinished.length && !this.workLost;
     this.canvas.flushActivity(); // canvas work still batched for a timer is recorded while the conversation is open
     this.brain.stop();
+    this.speaking.stop();
     this.transcriber.stop();
     // A snapshot whose canvas copy failed is not a final save.
     const saved = await step(this.autosave.save("end of session", { final: true }).then((snap) => (snap?.canvasFailed ? Promise.reject(new Error("the canvas copy failed")) : snap)), Hub.SHUTDOWN_MS.snapshot);

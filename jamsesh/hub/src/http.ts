@@ -203,7 +203,8 @@ const CLOSING = "The room is closing. Try again once it is open.";
 
 /** The live state for whoever asked: an agent's copy leaves out the Tasks board's proposals. */
 function forCaller<T extends { triage: unknown }>(state: T, agent: boolean): T {
-  return agent ? { ...state, triage: [] } : state;
+  // Nor the early copy of a line still settling (display only): an agent acts on what was settled.
+  return agent ? { ...state, triage: [], utterances: (state as any).utterances?.filter((u: { settled?: boolean }) => u.settled !== false) } : state;
 }
 
 function isLocal(ip: string) {
@@ -572,6 +573,10 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
             msg = { ...msg, event: { ...msg.event, data } };
           }
           if (agent && msg.type === "patch" && msg.key === "triage") return;
+          // Who is talking and early copies of lines are for people's windows to show; agents hear lines once they are settled.
+          if (agent && msg.type === "talking") return;
+          if (agent && msg.type === "utterance" && msg.utterance.settled === false) return;
+          if (agent && msg.type === "patch" && msg.key === "utterances") msg = { ...msg, value: (msg.value as { settled?: boolean }[]).filter((u) => u.settled !== false) };
           // A proposal is for people to approve: agents hear of wiki changes only once they are written.
           if (agent && msg.type === "wiki" && msg.kind === "ingest") return;
           ws.send(JSON.stringify(msg));
@@ -590,9 +595,12 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         }
         try {
           const m = JSON.parse(String(raw));
-          const me = m.type === "level" || m.type === "rtc" ? speaker(hub, ws) : null;
+          const me = m.type === "level" || m.type === "rtc" || m.type === "speaking" ? speaker(hub, ws) : null;
           if (m.type === "level" && me) {
             bus.send({ type: "level", deviceId: me, level: m.level });
+          } else if (m.type === "speaking" && me) {
+            // Display only: kept in memory, never stored, never sent to agents.
+            hub.speaking.update(me, m.on === true, Number(m.level));
           } else if (m.type === "ping") ws.send(JSON.stringify({ type: "pong", t: m.t, now: Date.now(), voiceEpoch: hub.session.store.voiceEpoch() }));
           else if (m.type === "drive") driveFrom(ws, hub, m);
           else if (m.type === "rtc" && me && typeof m.to === "string") {
@@ -615,6 +623,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           sockets.get(ws.data.deviceId)?.delete(ws);
           if (!sockets.get(ws.data.deviceId)?.size) {
             sockets.delete(ws.data.deviceId);
+            hub.speaking.drop(ws.data.deviceId);
             // A window closing while the room shuts down finds the store sealed: nothing left to tidy.
             try {
               s.touchDevice(ws.data.deviceId, { micOn: false, level: 0 });

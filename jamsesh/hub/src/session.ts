@@ -36,6 +36,7 @@ import type {
   Settings,
   Share,
   Stage,
+  Utterance,
   Workstream,
  TriageCard,
  BuildRequest, ReadyItem, ScreenInfo, ShowRequest, StageHistoryEntry, StageLock, StageTileKey, FontsState, LiveApp } from "./types";
@@ -298,7 +299,7 @@ export class Session {
       artifacts: this.stateArtifacts(),
       devservers: this.devserversForClients(),
       events: this.store.recentEvents({ limit: 250 }).map(publicEvent),
-      utterances: this.store.all("utterances").sort((a, b) => a.t0 - b.t0 || (a.id < b.id ? -1 : 1)).slice(-200),
+      utterances: this.utterances(),
       stage: this.stage(),
       shares: this.shares(),
       annotations: this.annotations(),
@@ -359,6 +360,14 @@ export class Session {
     }
   }
 
+  /** Lines shown early (the first copy of speech whose settle window is still open), for display only. Never stored. */
+  readonly previews = new Map<string, Utterance>();
+
+  /** The lines windows show: the stored ones and the early ones still settling. */
+  private utterances(): Utterance[] {
+    return [...this.store.all("utterances"), ...this.previews.values()].sort((a, b) => a.t0 - b.t0 || (a.id < b.id ? -1 : 1)).slice(-200);
+  }
+
   private resolve(key: string): { key: any; value: any } | null {
     switch (key) {
       case "people":
@@ -376,7 +385,7 @@ export class Session {
       case "devservers":
         return { key, value: this.devserversForClients() };
       case "utterances":
-        return { key, value: this.store.all("utterances").sort((a, b) => a.t0 - b.t0 || (a.id < b.id ? -1 : 1)).slice(-200) };
+        return { key, value: this.utterances() };
       case "totals":
         return { key, value: this.totals() };
       case "digest":
