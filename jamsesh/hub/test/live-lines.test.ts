@@ -182,7 +182,7 @@ test("an early line whose words were nothing at settle time is taken back", asyn
   expect(r.session.store.all("utterances")).toHaveLength(0);
   expect(r.lines).toHaveLength(0);
   const last = r.utterances().at(-1)!;
-  expect(last).toMatchObject({ text: "", settled: true });
+  expect(last).toMatchObject({ text: "", settled: false });
   r.off();
 });
 
@@ -307,5 +307,122 @@ test("windows hear who is talking and early lines; agents hear neither", async (
   } finally {
     server.stop(true);
     hub.devproxy.stop();
+  }
+});
+
+// ---- review fixes ----
+
+async function openHub(name: string) {
+  const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, name) });
+  const server = startHttp(hub, 0);
+  const browser = hub.auth.issue({ kind: "browser", label: "Laptop", ip: "10.0.0.6" });
+  const agent = hub.auth.issue({ kind: "agent", label: "Agents", ip: "10.0.0.5", ownerDeviceId: "host" });
+  const open = (token: string, device?: string) =>
+    new Promise<{ ws: WebSocket; got: any[] }>((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws${device ? `?device=${device}` : ""}`, { headers: { "x-forwarded-for": "9.9.9.9", authorization: `Bearer ${token}` } } as any);
+      const got: any[] = [];
+      ws.onmessage = (e) => got.push(JSON.parse(String(e.data)));
+      ws.onopen = () => resolve({ ws, got });
+      ws.onerror = reject;
+    });
+  const stop = () => (server.stop(true), hub.devproxy.stop());
+  return { hub, server, browser, agent, open, stop };
+}
+const stub = (hub: Hub, said: Map<string, string>) => ((hub.audio as any).transcriber = { transcribe: async (wav: Uint8Array) => ({ text: said.get(String(Bun.hash(wav))) ?? "", engine: "stub" }) });
+
+test("a retraction is display only: windows get it, an agent connection never does", async () => {
+  const r = await openHub("retract");
+  try {
+    const { hub } = r;
+    for (const id of ["lap-a", "lap-b", "lap-c"]) hub.session.touchDevice(id, { label: id, micOn: true, location: "room", kind: "client" });
+    const said = new Map<string, string>();
+    stub(hub, said);
+    const person = await r.open(r.browser.token);
+    const bot = await r.open(r.agent.token);
+    const t = base();
+    const hear = async (dev: string, text: string, seed: number, gain: number) => {
+      const wav = encodeWav({ sampleRate: 16000, samples: speech(2, seed, gain) });
+      said.set(String(Bun.hash(wav)), text);
+      await hub.audio.ingest({ deviceId: dev, t0: t, t1: t + 2000, wav });
+    };
+    await hear("lap-a", "thank you for watching", 21, 0.2);
+    await Bun.sleep(50);
+    await hear("lap-b", "", 22, 1); // the cleanest copy says nothing: the early line is taken back
+    await hub.audio.flush();
+    await Bun.sleep(200);
+    const mine = person.got.filter((m) => m.type === "utterance").map((m) => m.utterance);
+    expect(mine.every((u: any) => u.settled === false)).toBe(true);
+    expect(mine.at(-1)).toMatchObject({ text: "", settled: false });
+    expect(bot.got.filter((m) => m.type === "utterance" || m.type === "talking")).toEqual([]);
+    expect(JSON.stringify(bot.got)).not.toContain("thank you for watching");
+    person.ws.close();
+    bot.ws.close();
+  } finally {
+    r.stop();
+  }
+});
+
+test("speech held for someone's recording is not shown early either", async () => {
+  const r = await openHub("recording");
+  try {
+    const { hub } = r;
+    const ana = hub.session.upsertPerson({ name: "Ana" });
+    for (const id of ["lap-a", "lap-b", "lap-c"]) hub.session.touchDevice(id, { label: id, micOn: true, location: "room", kind: "client" });
+    hub.session.touchDevice("lap-a", { personId: ana.id });
+    const said = new Map<string, string>();
+    stub(hub, said);
+    const t = base();
+    hub.promptStart("lap-a", t - 5000);
+    const wav = encodeWav({ sampleRate: 16000, samples: speech(2, 31, 1) });
+    said.set(String(Bun.hash(wav)), "make the header bigger");
+    await hub.audio.ingest({ deviceId: "lap-a", t0: t, t1: t + 2000, wav });
+    await Bun.sleep(60);
+    expect(hub.session.previews.size).toBe(0);
+    await hub.audio.flush();
+    // Held for the recording as before: stored, no feed event.
+    expect(hub.session.store.all("utterances")).toHaveLength(1);
+    expect(hub.session.store.all("utterances")[0].eventId).toBeNull();
+  } finally {
+    r.stop();
+  }
+});
+
+test("the hub drops a window's speaking messages beyond its own rate limit", async () => {
+  const r = await openHub("burst");
+  try {
+    const { hub } = r;
+    const ana = hub.session.upsertPerson({ name: "Ana" });
+    hub.session.touchDevice("dev-ana", { label: "Ana", personId: ana.id, micOn: true, location: "room", kind: "client" });
+    const person = await r.open(r.browser.token, "dev-ana");
+    const watcher = await r.open(r.browser.token);
+    // 51 alternating messages at once: only the first few count, so it ends on "off" (an unlimited hub would end on "on").
+    for (let i = 0; i < 51; i++) person.ws.send(JSON.stringify({ type: "speaking", on: i % 2 === 0, level: -30 }));
+    await Bun.sleep(400);
+    const talks = watcher.got.filter((m) => m.type === "talking");
+    expect(talks.length).toBeLessThanOrEqual(5);
+    expect(talks.at(-1).talkers[0]).toMatchObject({ name: "Ana", live: false });
+    person.ws.close();
+    watcher.ws.close();
+  } finally {
+    r.stop();
+  }
+});
+
+test("a window that connects mid-sentence is told who is talking now; an agent is not", async () => {
+  const r = await openHub("reconnect");
+  try {
+    const { hub } = r;
+    const ana = hub.session.upsertPerson({ name: "Ana" });
+    hub.session.touchDevice("dev-ana", { label: "Ana", personId: ana.id, micOn: true, location: "room", kind: "client" });
+    hub.speaking.update("dev-ana", true, -30);
+    const late = await r.open(r.browser.token);
+    const bot = await r.open(r.agent.token);
+    await Bun.sleep(150);
+    expect(late.got.find((m) => m.type === "talking").talkers).toMatchObject([{ name: "Ana", live: true }]);
+    expect(bot.got.filter((m) => m.type === "talking")).toEqual([]);
+    late.ws.close();
+    bot.ws.close();
+  } finally {
+    r.stop();
   }
 });

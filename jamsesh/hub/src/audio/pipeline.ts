@@ -160,6 +160,8 @@ export class AudioPipeline {
   onLine: ((u: Utterance, isNew: boolean) => void) | null = null;
   /** Called when a line is shown to the room's windows, early copy or settled (the talking indicator gives way to it). Display only. */
   onShown: ((u: Utterance) => void) | null = null;
+  /** The hub's recording exclusion: speech held for someone's recorded prompt never reaches the room, early copy or settled. */
+  excluded: ((u: Utterance) => boolean) | null = null;
   /** Counts a transcription as work in flight (Hub.track), so shutdown waits for its line. */
   track: <T>(work: Promise<T>) => Promise<T> = (work) => work;
 
@@ -505,7 +507,7 @@ export class AudioPipeline {
     if (this.isCalibration(text, g)) return;
     const best = pickBest(g.segments);
     const u = this.draft(g, best, text, engine);
-    if (this.findTwin(g, text, best, true) || this.echoOf(u, best.snr, true) === "drop") return;
+    if (this.excluded?.(u) || this.findTwin(g, text, best, true) || this.echoOf(u, best.snr, true) === "drop") return;
     g.previewId = u.id;
     g.preview = seg;
     this.session.previews.set(u.id, u);
@@ -553,8 +555,8 @@ export class AudioPipeline {
     g.preview = null;
     const u = this.session.previews.get(id);
     this.session.previews.delete(id);
-    // Settled and empty, with no event behind it: windows show nothing for it.
-    if (u) bus.send({ type: "utterance", utterance: { ...u, text: "", settled: true } });
+    // Still display only (settled: false, so agents never hear it), and empty: windows show nothing for it.
+    if (u) bus.send({ type: "utterance", utterance: { ...u, text: "", settled: false } });
   }
 
   /** Adds copies' devices to a line, keeping the ones it already lists. */

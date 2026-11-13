@@ -202,9 +202,22 @@ const bad = (msg: string, status = 400) => json({ error: msg }, status);
 const CLOSING = "The room is closing. Try again once it is open.";
 
 /** The live state for whoever asked: an agent's copy leaves out the Tasks board's proposals. */
+/**
+ * The one place that decides what an agent may hear of the room's lines and who is talking: stored, settled lines only.
+ * Early copies, their retractions and the talking indicator are display only (`settled === false`), for people's windows.
+ * Every utterance-shaped message and list an agent receives goes through here.
+ */
+const settledOnly = (u: { settled?: boolean }) => u.settled !== false;
+export function forAgent(msg: BusMessage): BusMessage | null {
+  if (msg.type === "talking") return null;
+  if (msg.type === "utterance") return settledOnly(msg.utterance) ? msg : null;
+  if (msg.type === "patch" && msg.key === "utterances") return { ...msg, value: (msg.value as { settled?: boolean }[]).filter(settledOnly) };
+  return msg;
+}
+
 function forCaller<T extends { triage: unknown }>(state: T, agent: boolean): T {
   // Nor the early copy of a line still settling (display only): an agent acts on what was settled.
-  return agent ? { ...state, triage: [], utterances: (state as any).utterances?.filter((u: { settled?: boolean }) => u.settled !== false) } : state;
+  return agent ? { ...state, triage: [], utterances: (state as any).utterances?.filter(settledOnly) } : state;
 }
 
 function isLocal(ip: string) {
@@ -574,14 +587,19 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           }
           if (agent && msg.type === "patch" && msg.key === "triage") return;
           // Who is talking and early copies of lines are for people's windows to show; agents hear lines once they are settled.
-          if (agent && msg.type === "talking") return;
-          if (agent && msg.type === "utterance" && msg.utterance.settled === false) return;
-          if (agent && msg.type === "patch" && msg.key === "utterances") msg = { ...msg, value: (msg.value as { settled?: boolean }[]).filter((u) => u.settled !== false) };
+          if (agent) {
+            const allowed = forAgent(msg);
+            if (!allowed) return;
+            msg = allowed;
+          }
           // A proposal is for people to approve: agents hear of wiki changes only once they are written.
           if (agent && msg.type === "wiki" && msg.kind === "ingest") return;
           ws.send(JSON.stringify(msg));
         });
         (ws as any).off = off;
+        // A window that connects (or reconnects) mid-sentence learns who is talking now.
+        const now = agent ? [] : hub.speaking.talkers();
+        if (now.length) ws.send(JSON.stringify({ type: "talking", talkers: now } satisfies BusMessage));
         if (ws.data.deviceId) {
           const set = sockets.get(ws.data.deviceId) ?? new Set();
           set.add(ws);

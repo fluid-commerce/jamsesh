@@ -15,6 +15,8 @@ import type { Talker, Utterance } from "./types";
 const PUBLISH_MS = 200;
 /** A talker stays this long after their speech stops, in case their line is about to appear. */
 const LINGER_MS = 1000;
+/** Most messages the hub takes from one laptop in a second (a client sends five); the rest are dropped. */
+const MAX_PER_SECOND = 8;
 /** A laptop that stops reporting (a closed lid, a lost connection) is not talking after this. */
 const STALE_MS = 3000;
 /** The room's talker changes to a louder laptop only when it is this much louder. */
@@ -35,11 +37,17 @@ export class Speaking {
   private pending: ReturnType<typeof setTimeout> | null = null;
   private sweep: ReturnType<typeof setInterval> | null = null;
   private last = "";
+  private rate = new Map<string, { since: number; n: number }>();
 
   constructor(private session: Session) {}
 
   /** A laptop's microphone heard speech start (`on`), carries on (`on` with a level), or ended. */
   update(deviceId: string, on: boolean, level: number) {
+    // Enforced here, whatever a client sends: a device gets this many messages a second, the rest are dropped (never queued).
+    const now = Date.now();
+    const w = this.rate.get(deviceId);
+    if (!w || now - w.since >= 1000) this.rate.set(deviceId, { since: now, n: 1 });
+    else if (++w.n > MAX_PER_SECOND) return;
     const d = this.session.store.get("devices", deviceId);
     // A muted microphone, and a laptop the hub doesn't know, say nothing.
     if (!d || !d.micOn) return this.drop(deviceId);
