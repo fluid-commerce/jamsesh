@@ -43,7 +43,7 @@ export class Speaking {
 
   constructor(private session: Session) {
     // Anything that changes a laptop's registration (mute, a person's name, a laptop leaving) can change who is shown.
-    this.offDevices = bus.on((m) => m.type === "patch" && m.key === "devices" && this.entries.size > 0 && this.publish());
+    this.offDevices = bus.on((m) => m.type === "patch" && m.key === "devices" && this.reconcile());
   }
 
   /** A laptop's microphone heard speech start (`on`), carries on (`on` with a level), or ended. */
@@ -71,6 +71,16 @@ export class Speaking {
     this.entries.set(deviceId, { level: db, at: Date.now(), live: true, gone: null, shown: cur?.shown ?? false });
     this.sweep ??= setInterval(() => this.expire(), 1000);
     this.sweep.unref?.();
+    this.publish();
+  }
+
+  /** A registration changed: a laptop whose mic is off, or that is gone, loses its entry for good (only a fresh start can show it again). */
+  private reconcile() {
+    if (!this.entries.size) return;
+    for (const id of [...this.entries.keys()]) {
+      const d = this.session.store.get("devices", id);
+      if (!d || !d.micOn) this.drop(id);
+    }
     this.publish();
   }
 

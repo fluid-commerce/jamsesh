@@ -203,7 +203,7 @@ export class Hub {
     this.audio.track = (work) => this.track("speech being transcribed", work);
     this.speaking = new Speaking(this.session);
     this.audio.onShown = (u) => this.speaking.lineShown(u);
-    this.audio.excluded = (u) => this.inPrompt(u);
+    this.audio.recordingActive = () => this.promptMode.size > 0 || this.stoppingRecs.size > 0 || this.recs.size > 0;
     this.canvas = new Canvas(this.session, this.helpers, dir);
     this.fonts = new FontService(() => this.session.agents(), (id) => this.session.person(id)?.name);
     this.session.fonts = () => this.fonts.state();

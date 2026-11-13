@@ -160,8 +160,8 @@ export class AudioPipeline {
   onLine: ((u: Utterance, isNew: boolean) => void) | null = null;
   /** Called when a line is shown to the room's windows, early copy or settled (the talking indicator gives way to it). Display only. */
   onShown: ((u: Utterance) => void) | null = null;
-  /** The hub's recording exclusion: speech held for someone's recorded prompt never reaches the room, early copy or settled. */
-  excluded: ((u: Utterance) => boolean) | null = null;
+  /** The hub's live recording state: while any recording window is open, nothing is shown early (lines settle as they always did). */
+  recordingActive: (() => boolean) | null = null;
   /** Counts a transcription as work in flight (Hub.track), so shutdown waits for its line. */
   track: <T>(work: Promise<T>) => Promise<T> = (work) => work;
 
@@ -517,12 +517,12 @@ export class AudioPipeline {
   /**
    * THE ONE RULE FOR EARLY LINES, and the only way one is made: it shows the words, speaker and laptop of the one copy that
    * was transcribed, and nothing changes it until the settled line replaces it (or takes it back). No later copy relabels it.
-   * Returns nothing when the settled line would drop it or hold it back: no words, the join read, speech held for a
-   * recording, an echo, a twin.
+   * Returns nothing when the settled line would drop it or hold it back: no words, the join read, any recording
+   * being open anywhere in the room, an echo, a twin.
    */
   private earlyLine(g: Group, seg: Segment, heard: { text: string; engine: string }): Utterance | undefined {
     const { text, engine } = heard;
-    if (!text || this.isCalibration(text, g)) return undefined;
+    if (!text || this.recordingActive?.() || this.isCalibration(text, g)) return undefined;
     const guess = this.identify([seg], seg, !g.split);
     const u: Utterance = {
       id: newId("utt"),
@@ -540,7 +540,7 @@ export class AudioPipeline {
       engine,
       settled: false,
     };
-    if (this.excluded?.(u) || this.findTwin(g, text, seg, true) || this.echoOf(u, seg.snr, true) === "drop") return undefined;
+    if (this.findTwin(g, text, seg, true) || this.echoOf(u, seg.snr, true) === "drop") return undefined;
     return u;
   }
 

@@ -521,7 +521,11 @@ test("muting through registration while someone is talking clears the indicator 
   r.session.touchDevice("a", { micOn: false });
   await Bun.sleep(320);
   expect(r.msgs.at(-1)!.talkers).toEqual([]);
+  // Unmuted with no new speaking message: the old entry is gone for good, nothing shows.
   r.session.touchDevice("a", { micOn: true });
+  await Bun.sleep(320);
+  expect(r.msgs.at(-1)!.talkers).toEqual([]);
+  // Only a fresh start after the unmute shows it.
   r.speaking.update("a", true, -30);
   await Bun.sleep(250);
   expect(r.msgs.at(-1)!.talkers).toMatchObject([{ name: "Ana" }]);
@@ -544,4 +548,38 @@ test("an early line is frozen: later copies, same words or other speech, never r
   await r.pipeline.flush();
   expect(r.session.store.all("utterances").find((u) => u.id === early.id)).toMatchObject({ text: "put the pricing page up", speakerName: "Bob" });
   r.off();
+});
+
+test("while any recording is open, no early line reaches any window; lines settle as they always did", async () => {
+  const r = await openHub("anyrec");
+  try {
+    const { hub } = r;
+    const ana = hub.session.upsertPerson({ name: "Ana" });
+    const bob = hub.session.upsertPerson({ name: "Bob" });
+    for (const id of ["lap-a", "lap-b", "lap-c"]) hub.session.touchDevice(id, { label: id, micOn: true, location: "room", kind: "client" });
+    hub.session.touchDevice("lap-a", { personId: ana.id });
+    hub.session.touchDevice("lap-b", { personId: bob.id });
+    const said = new Map<string, string>();
+    stub(hub, said);
+    const watcher = await r.open(r.browser.token);
+    const t = base();
+    hub.promptStart("lap-a", t - 5000); // Ana records
+    const hear = async (dev: string, seed: number, gain: number) => {
+      const wav = encodeWav({ sampleRate: 16000, samples: speech(2, seed, gain) });
+      said.set(String(Bun.hash(wav)), "make the header bigger");
+      await hub.audio.ingest({ deviceId: dev, t0: t, t1: t + 2000, wav });
+    };
+    await hear("lap-c", 81, 0.2); // a bystander's laptop, first
+    await Bun.sleep(80);
+    await hear("lap-a", 82, 1); // the recorder's own, later
+    await hub.audio.flush();
+    await Bun.sleep(150);
+    expect(hub.session.previews.size).toBe(0);
+    expect(watcher.got.filter((m) => m.type === "utterance").every((m) => m.utterance.settled !== false)).toBe(true);
+    // As before: held for the recording, no feed event.
+    expect(hub.session.store.all("utterances").map((u) => u.eventId)).toEqual([null]);
+    watcher.ws.close();
+  } finally {
+    r.stop();
+  }
 });
