@@ -11,7 +11,7 @@ import { config } from "../src/config";
 import { Parakeet, PARAKEET, PARAKEET_LANGUAGES, findModel, installedIntact } from "../src/audio/parakeet";
 import { buildVocabulary, cleanVocabulary, correctTranscript, hotwords, MAX_VOCAB, promptWith } from "../src/audio/vocabulary";
 import { encodeWav } from "../src/audio/wav";
-import { sttHandler, vocabularyFrom, type SttModel } from "../src/audio/stt-server";
+import { MAX_TERMS, sttHandler, vocabularyFrom, type SttModel } from "../src/audio/stt-server";
 
 const ROOM = buildVocabulary({
   people: ["Chey", "Britt", "Felipe", "Jonathan", "Grace", "Mark"],
@@ -515,43 +515,57 @@ test("the Parakeet process answers whisper.cpp's shape: {text} for a WAV, 400 fo
 });
 
 test("the room's hotwords become the model's vocabulary when it takes one, and nothing when it doesn't", async () => {
-  expect(vocabularyFrom("Chey/JamSesh/left-hand nav/ /Chey/Fig<script>Craft")).toEqual(["Chey", "JamSesh", "left-hand nav", "Fig script Craft"]);
-  expect(vocabularyFrom(Array.from({ length: 300 }, (_, i) => `w${i}`).join("/"))).toHaveLength(120);
+  // One spelling per term (the hub sends each in both cases), junk removed, in the hub's order.
+  expect(vocabularyFrom("Chey/chey/JamSesh/jamsesh/left-hand nav/ /Chey/Fig<script>Craft")).toEqual(["Chey", "JamSesh", "left-hand nav", "Fig script Craft"]);
+  // At most 64, the first ones: people and agents come first in the hub's list, so they're kept.
+  const many = vocabularyFrom(hotwords(buildVocabulary({ people: ["Chey", "Britt"], agents: ["Felipe's Codex"], terms: Array.from({ length: 300 }, (_, i) => `term${i}`) })));
+  expect(many).toHaveLength(MAX_TERMS);
+  expect(MAX_TERMS).toBe(64);
+  expect(many.slice(0, 3)).toEqual(["Chey", "Britt", "Felipe's Codex"]);
   const takes = standIn(true);
   await takes.handle(post(withWav(clip, hotwords(ROOM))));
   expect(takes.asked[0].vocabulary).toEqual(expect.arrayContaining(["Chey", "JamSesh", "FigCraft", "left-hand nav", "Felipe's Codex"]));
   await takes.handle(post(withWav(clip)));
   expect(takes.asked[1].vocabulary).toBeUndefined();
-  // Parakeet in transcribe.cpp 0.4 takes none: the words aren't sent (the correction pass still fixes them).
+  // Upstream transcribe.cpp's Parakeet takes none (only Hex's fork does): the words aren't sent.
   const ignores = standIn(false);
   await ignores.handle(post(withWav(clip, hotwords(ROOM))));
   expect(ignores.asked[0].vocabulary).toBeUndefined();
 });
 
 // The real model, when this machine has it (JAMSESH_TEST_PARAKEET_DIR, a folder holding the pinned
-// GGUF): a clip spoken with `say -o` (writes a file, plays nothing) goes through the child process
-// (transcribe.cpp, on the GPU) and the correction pass.
+// GGUF) and Hex's fork of transcribe.cpp (JAMSESH_TEST_TRANSCRIBE_LIBRARY, from app/build-transcribe.sh):
+// a clip spoken with `say -o` (writes a file, plays nothing) goes through the child process
+// (on the GPU), its vocabulary rescoring and the correction pass.
 const MODEL = process.env.JAMSESH_TEST_PARAKEET_DIR;
+const FORK = process.env.JAMSESH_TEST_TRANSCRIBE_LIBRARY;
 const canSay = existsSync("/usr/bin/say");
-test.skipIf(!MODEL || !canSay)("end to end: Parakeet hears the room's words, and its process goes when the hub does", async () => {
+test.skipIf(!MODEL || !FORK || !canSay)("end to end: Parakeet hears the room's words, and its process goes when the hub does", async () => {
   process.env.JAMSESH_PARAKEET_DIR = MODEL;
+  process.env.JAMSESH_TRANSCRIBE_LIBRARY = FORK;
   const hub = room();
-  const aiff = join(dir, "clip.aiff");
   const wav = join(dir, "clip.wav");
-  Bun.spawnSync(["/usr/bin/say", "-o", aiff, "-v", "Samantha", "Shay, put JamSesh and FigCraft on the big screen."]);
-  Bun.spawnSync(["ffmpeg", "-loglevel", "quiet", "-y", "-i", aiff, "-ar", "16000", "-ac", "1", wav]);
+  // The system voice: unbiased, Parakeet writes "jam sesh"; the rescoring makes it JamSesh. (Samantha's
+  // "JamSesh and" comes out "jam session", which needs a sounds-like spelling the 0.4.1 binding can't pass.)
+  Bun.spawnSync(["/usr/bin/say", "-o", wav, "--data-format=LEI16@16000", "Shay, put JamSesh and FigCraft on the big screen."]);
   hub.session.updateSettings({ fastEngine: true });
   expect(await hub.transcriber.syncFastEngine()).toBe(true);
   expect(hub.transcriber.parakeet.status()).toMatchObject({ state: "ready", installed: true });
   const r = await hub.transcriber.transcribe(new Uint8Array(await Bun.file(wav).arrayBuffer()), 3.5, "JamSesh.");
   expect(r.engine).toBe("host Parakeet");
   expect(r.text).toContain("Chey");
+  expect(r.text).toContain("JamSesh");
   expect(r.text).toContain("FigCraft");
-  expect(r.text).toContain("big screen");
-  // No hotwords in transcribe.cpp's Parakeet: "JamSesh" here is often heard as "jam session", which
-  // the correction pass leaves alone (an everyday word); "jam sesh" it does fix.
-  // The child refuses what isn't a WAV, and a clip longer than a minute.
+  // A clip with none of the room's words comes out the same with the list as without it.
   const url = engines(hub).get("parakeet").url;
+  const plain = join(dir, "plain.wav");
+  Bun.spawnSync(["/usr/bin/say", "-o", plain, "--data-format=LEI16@16000", "The weather is nice today, so we will eat lunch outside by the river."]);
+  const plainWav = new Uint8Array(await Bun.file(plain).arrayBuffer());
+  const heard = async (hot?: string) => ((await (await fetch(`${url}/inference`, { method: "POST", body: withWav(plainWav, hot) })).json()) as { text: string }).text;
+  const without = await heard();
+  expect(without).toContain("weather");
+  expect(await heard(hotwords(hub.transcriber.vocabulary()))).toBe(without);
+  // The child refuses what isn't a WAV, and a clip longer than a minute.
   const bad = new FormData();
   bad.append("file", new Blob(["not audio"]), "x.wav");
   expect((await fetch(`${url}/inference`, { method: "POST", body: bad })).status).toBe(400);
@@ -580,6 +594,7 @@ test.skipIf(!MODEL || !canSay)("end to end: Parakeet hears the room's words, and
   (child.stdin as import("bun").FileSink).end();
   expect(await Promise.race([child.exited, Bun.sleep(5000).then(() => "still running")])).toBe(0);
   delete process.env.JAMSESH_PARAKEET_DIR;
+  delete process.env.JAMSESH_TRANSCRIBE_LIBRARY;
 }, 60_000);
 
 // ---- the host's whisper.cpp: bundled server, model downloaded once ----

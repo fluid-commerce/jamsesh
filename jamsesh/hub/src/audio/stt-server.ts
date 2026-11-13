@@ -2,7 +2,8 @@
 // engine pool treats it like any other local engine. The form carries `file` (a WAV) and, optionally,
 // `hotwords` ("Chey/JamSesh/left-hand nav"). Prints "listening <port>" once the model is loaded.
 // It runs the GGUF model through transcribe.cpp (the `transcribe-cpp` package), on the Mac's GPU
-// (Metal) on Apple silicon.
+// (Metal) on Apple silicon, with Hex's fork of the library when it's there (app/build-transcribe.sh),
+// which rescores the words Parakeet heard against the room's list.
 
 import { config } from "../config";
 import { decodeWav, resample } from "./wav";
@@ -11,24 +12,55 @@ import { decodeWav, resample } from "./wav";
 const MAX_SECONDS = 60;
 /** The model's input rate. */
 const RATE = 16_000;
-/** No more terms than the hub sends (vocabulary.ts `hotwords`). */
-const MAX_TERMS = 120;
+/** The most terms Parakeet's rescoring takes (Hex's fork caps it at 64 too); the first ones win. */
+export const MAX_TERMS = 64;
 
-/** The `transcribe-cpp` module. Inside the Mac app the hub is one compiled program, so it's found in the bundled node_modules at run time, never bundled. */
+/**
+ * The `transcribe-cpp` module. Inside the Mac app the hub is one compiled program, so it's found in
+ * the bundled node_modules at run time, never bundled. When Hex's fork of the library is on this
+ * Mac (config.transcribeLibrary), the binding loads it instead of its own (same C ABI), so Parakeet
+ * takes the room's words.
+ */
 export async function loadTranscribeCpp(): Promise<typeof import("transcribe-cpp")> {
-  const where: string = config.nodeModules ? Bun.resolveSync("transcribe-cpp", config.nodeModules) : "transcribe-cpp";
+  if (config.transcribeLibrary && !process.env.TRANSCRIBE_LIBRARY) process.env.TRANSCRIBE_LIBRARY = config.transcribeLibrary;
+  const where: string = config.nodeModules ? Bun.resolveSync("transcribe-cpp", config.nodeModules) : Bun.resolveSync("transcribe-cpp", import.meta.dir);
+  await keepKoffiArrays(Bun.resolveSync("koffi", where));
   return await import(where);
 }
 
-/** The hub's `hotwords` field ("Chey/JamSesh/left-hand nav") as a list of terms, in order, without junk. */
+/**
+ * The binding makes a new koffi array type for every run's word list. Under Bun a koffi type that is
+ * garbage-collected aborts the process (its finalizer isn't GC-safe), so each array type is made once
+ * and kept: at most one per list length.
+ */
+async function keepKoffiArrays(koffiPath: string) {
+  // The module the binding imports (koffi's ESM entry), not a second copy through require.
+  const koffi = (await import(koffiPath)).default as { array: (...a: unknown[]) => unknown; __jamKept?: boolean };
+  if (koffi.__jamKept) return;
+  const make = koffi.array.bind(koffi);
+  const kept = new Map<string, unknown>();
+  koffi.array = (type: unknown, length: unknown, ...rest: unknown[]) => {
+    if (typeof type !== "string" || typeof length !== "number" || rest.length) return make(type, length, ...rest);
+    const key = `${type}\u0000${length}`;
+    if (!kept.has(key)) kept.set(key, make(type, length));
+    return kept.get(key);
+  };
+  koffi.__jamKept = true;
+}
+
+/** The hub's `hotwords` field ("Chey/chey/JamSesh/jamsesh/left-hand nav", people and agents first) as terms, in order, one per spelling, at most MAX_TERMS. */
 export function vocabularyFrom(hotwords: string): string[] {
+  const out: string[] = [];
   const seen = new Set<string>();
   for (const raw of hotwords.slice(0, 4000).split("/")) {
     const term = raw.replace(/[^\p{L}\p{N}' .&-]+/gu, " ").replace(/\s+/g, " ").trim();
-    if (term && !seen.has(term)) seen.add(term);
-    if (seen.size >= MAX_TERMS) break;
+    const key = term.toLowerCase();
+    if (!term || seen.has(key)) continue;
+    seen.add(key);
+    out.push(term);
+    if (out.length >= MAX_TERMS) break;
   }
-  return [...seen];
+  return out;
 }
 
 /** What the server needs of a loaded model (transcribe-cpp's TranscribeModel). */
@@ -39,7 +71,7 @@ export interface SttModel {
 
 /** The server's request handler: POST /inference with `file` (a WAV) and optional `hotwords`, answering `{text}` or `{error}`. */
 export function sttHandler(asr: SttModel) {
-  // Parakeet in transcribe.cpp takes no word list today; when a build does, the room's words go to it.
+  // Hex's fork rescores Parakeet's words against the list (2.5 nats per piece, its default); upstream transcribe.cpp takes none.
   const biased = asr.supports("vocabulary");
   return async (req: Request): Promise<Response> => {
     if (new URL(req.url).pathname !== "/inference") return new Response("parakeet");

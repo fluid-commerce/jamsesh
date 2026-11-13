@@ -21,6 +21,9 @@ bun hub/src/emit-setup.ts "$OUT"
 # commit, straight into the bundle: a stamp beside a binary can be written by anyone, so no binary
 # found on this machine is bundled on the strength of one.
 app/build-whisper.sh "$OUT/bin"
+# Parakeet's library, from Hex's fork of transcribe.cpp (vocabulary rescoring); the hub points the binding at it.
+app/build-transcribe.sh "$OUT/lib/transcribe"
+rm -f "$OUT/lib/transcribe/transcribe.build"
 rm -f "$OUT/bin/whisper-server.build"
 for b in figcraft-server figcraft-cli; do cp "$JAM/bin/$b" "$OUT/bin/"; done
 ARCH="$(uname -m | sed 's/x86_64/x64/')"
