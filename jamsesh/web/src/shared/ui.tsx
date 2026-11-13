@@ -754,7 +754,7 @@ function RoomFeedOf({ big, editable, filter = "all" }: { big?: boolean; editable
   return (
     <div className="feed-wrap">
       <div ref={box} className="feed" onScroll={onScroll} style={{ fontSize: big ? 17 : 14 }}>
-        {events.length === 0 && <div className="empty-note">The room's conversation shows up here as people talk.</div>}
+        {events.length === 0 && early.length === 0 && <div className="empty-note">The room's conversation shows up here as people talk.</div>}
         {!exhausted && first != null && (
           <button className="feed-older" disabled={older.loading} onClick={() => void loadOlder()}>
             {older.loading ? "Loading earlier lines" : older.failed ? "Couldn't load earlier lines. Try again" : older.more ? `${older.more} earlier ${older.more === 1 ? "line" : "lines"}` : "Earlier lines"}

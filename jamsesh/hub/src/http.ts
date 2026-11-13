@@ -209,7 +209,7 @@ const CLOSING = "The room is closing. Try again once it is open.";
  */
 const settledOnly = (u: { settled?: boolean }) => u.settled !== false;
 export function forAgent(msg: BusMessage): BusMessage | null {
-  if (msg.type === "talking") return null;
+  if (msg.type === "talking" || msg.type === "utterance-retracted") return null;
   if (msg.type === "utterance") return settledOnly(msg.utterance) ? msg : null;
   if (msg.type === "patch" && msg.key === "utterances") return { ...msg, value: (msg.value as { settled?: boolean }[]).filter(settledOnly) };
   return msg;
@@ -217,7 +217,10 @@ export function forAgent(msg: BusMessage): BusMessage | null {
 
 function forCaller<T extends { triage: unknown }>(state: T, agent: boolean): T {
   // Nor the early copy of a line still settling (display only): an agent acts on what was settled.
-  return agent ? { ...state, triage: [], utterances: (state as any).utterances?.filter(settledOnly) } : state;
+  if (!agent) return state;
+  const list = (state as any).utterances;
+  const kept = list ? ((forAgent({ type: "patch", key: "utterances", value: list }) as { value: unknown[] }).value) : list;
+  return { ...state, triage: [], utterances: kept };
 }
 
 function isLocal(ip: string) {

@@ -181,8 +181,7 @@ test("an early line whose words were nothing at settle time is taken back", asyn
   expect(r.session.previews.size).toBe(0);
   expect(r.session.store.all("utterances")).toHaveLength(0);
   expect(r.lines).toHaveLength(0);
-  const last = r.utterances().at(-1)!;
-  expect(last).toMatchObject({ text: "", settled: false });
+  expect(r.sent.at(-1)).toMatchObject({ type: "utterance-retracted", id: [...r.utterances()].at(-1)!.id });
   r.off();
 });
 
@@ -352,8 +351,8 @@ test("a retraction is display only: windows get it, an agent connection never do
     await Bun.sleep(200);
     const mine = person.got.filter((m) => m.type === "utterance").map((m) => m.utterance);
     expect(mine.every((u: any) => u.settled === false)).toBe(true);
-    expect(mine.at(-1)).toMatchObject({ text: "", settled: false });
-    expect(bot.got.filter((m) => m.type === "utterance" || m.type === "talking")).toEqual([]);
+    expect(person.got.at(-1)).toMatchObject({ type: "utterance-retracted", id: mine.at(-1).id });
+    expect(bot.got.filter((m) => ["utterance", "talking", "utterance-retracted"].includes(m.type))).toEqual([]);
     expect(JSON.stringify(bot.got)).not.toContain("thank you for watching");
     person.ws.close();
     bot.ws.close();
@@ -425,4 +424,32 @@ test("a window that connects mid-sentence is told who is talking now; an agent i
   } finally {
     r.stop();
   }
+});
+
+test("a failure while the settled line is being written takes the early line back", async () => {
+  const r = room();
+  const t = base();
+  r.pipeline.onLine = () => {
+    throw new Error("downstream broke");
+  };
+  const errs = console.error;
+  console.error = () => {};
+  try {
+    await r.hear("lap-a", t, 2, "make it blue", 41, 0.5);
+    await Bun.sleep(40);
+    expect(r.session.previews.size).toBe(1);
+    await r.pipeline.flush();
+  } finally {
+    console.error = errs;
+  }
+  expect(r.session.previews.size).toBe(0);
+  expect(r.sent.some((m) => m.type === "utterance-retracted")).toBe(true);
+  r.off();
+});
+
+test("an agent's initial state and /state go through the same filter", () => {
+  const { forAgent } = require("../src/http");
+  const list = [{ id: "a", settled: false }, { id: "b" }];
+  expect((forAgent({ type: "patch", key: "utterances", value: list }) as any).value.map((u: any) => u.id)).toEqual(["b"]);
+  expect(forAgent({ type: "utterance-retracted", id: "a" })).toBeNull();
 });

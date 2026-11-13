@@ -479,9 +479,7 @@ export class AudioPipeline {
     const echo = this.echoOf(u, best.snr);
     if (echo === "drop") return false;
     g.utteranceId = u.id;
-    g.previewId = null;
-    g.preview = null;
-    this.session.previews.delete(u.id);
+    // The early line stays until the settled one is out: anything that fails on the way takes it back (emit's catch).
     this.stats.lines++;
     if (guess.method.startsWith("voice")) this.stats.voice++;
     if (!guess.personId) this.stats.someone++;
@@ -490,6 +488,9 @@ export class AudioPipeline {
     this.onLine?.(u, true);
     bus.send({ type: "utterance", utterance: u });
     this.onShown?.(u);
+    g.previewId = null;
+    g.preview = null;
+    this.session.previews.delete(u.id);
     return true;
   }
 
@@ -555,8 +556,8 @@ export class AudioPipeline {
     g.preview = null;
     const u = this.session.previews.get(id);
     this.session.previews.delete(id);
-    // Still display only (settled: false, so agents never hear it), and empty: windows show nothing for it.
-    if (u) bus.send({ type: "utterance", utterance: { ...u, text: "", settled: false } });
+    // Display only: windows remove the line by id; agents never hear of it.
+    if (u) bus.send({ type: "utterance-retracted", id });
   }
 
   /** Adds copies' devices to a line, keeping the ones it already lists. */

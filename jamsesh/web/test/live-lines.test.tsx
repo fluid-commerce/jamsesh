@@ -105,3 +105,23 @@ test("a microphone tells the room when speech starts and ends, five times a seco
   p.step(true, -45, 100);
   expect(p.step(true, -45, 200)).toEqual({ on: true, level: -20 });
 });
+
+test("retractions remove the line by id: any number of them leave real lines in the capped list", () => {
+  const h = hub as any;
+  h.handle({ type: "state", state: baseState([], []) });
+  h.handle({ type: "utterance", utterance: utt({ id: "real", settled: undefined, t0: 1 }) });
+  for (let i = 0; i < 700; i++) {
+    h.handle({ type: "utterance", utterance: utt({ id: `e${i}`, t0: 10 + i }) });
+    h.handle({ type: "utterance-retracted", id: `e${i}` });
+  }
+  expect(hub.get().state!.utterances.map((u) => u.id)).toEqual(["real"]);
+});
+
+test("the empty-feed note is not shown while an early line is", () => {
+  feed(baseState([], [utt()]));
+  const { container } = render(<RoomFeed big />);
+  expect(container.querySelector(".empty-note")).toBeNull();
+  cleanup();
+  feed(baseState([], []));
+  expect(render(<RoomFeed big />).container.querySelector(".empty-note")).not.toBeNull();
+});

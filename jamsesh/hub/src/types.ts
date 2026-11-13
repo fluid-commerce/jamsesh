@@ -825,6 +825,8 @@ export type BusMessage =
   | { type: "speak"; audio: string | null; text: string; mime: string }
   | { type: "level"; deviceId: string; level: number }
   | { type: "talking"; talkers: Talker[] }
+  /** An early line that did not become a line: windows remove it by id (display only, never sent to agents). */
+  | { type: "utterance-retracted"; id: string }
   | { type: "thinking"; on: boolean; label?: string }
   | { type: "rtc"; from: string; to: string; data: any }
   | { type: "drive"; screen: string; personId: string; name: string; color: string; ev: DriveEvent; t: number }

@@ -365,7 +365,9 @@ export class Session {
 
   /** The lines windows show: the stored ones and the early ones still settling. */
   private utterances(): Utterance[] {
-    return [...this.store.all("utterances"), ...this.previews.values()].sort((a, b) => a.t0 - b.t0 || (a.id < b.id ? -1 : 1)).slice(-200);
+    const stored = this.store.all("utterances");
+    const have = new Set(stored.map((u) => u.id));
+    return [...stored, ...[...this.previews.values()].filter((p) => !have.has(p.id))].sort((a, b) => a.t0 - b.t0 || (a.id < b.id ? -1 : 1)).slice(-200);
   }
 
   private resolve(key: string): { key: any; value: any } | null {

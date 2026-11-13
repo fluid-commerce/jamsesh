@@ -386,6 +386,8 @@ class HubClient {
       }
       case "thinking":
         return this.set({ thinking: m.on ? m.label ?? "Thinking" : null });
+      case "utterance-retracted":
+        return s ? this.set({ state: { ...s, utterances: s.utterances.filter((u) => u.id !== m.id) } }) : undefined;
       case "talking":
         return this.set({ talkers: m.talkers });
       case "level":
