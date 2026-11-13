@@ -139,8 +139,6 @@ export const config = {
   skillFile: firstExisting(res("skill", "SKILL.md"), join(REPO, "jamsesh", "skill", "SKILL.md")) ?? join(REPO, "jamsesh", "skill", "SKILL.md"),
   /** Where the voiceprint library is installed (the app ships it next to the hub). */
   nodeModules: firstExisting(res("node_modules")),
-  /** transcribe.cpp built from Hex's fork (app/build-transcribe.sh), which adds Parakeet vocabulary rescoring; without it Parakeet runs unbiased on the binding's own library. */
-  transcribeLibrary: firstExisting(process.env.JAMSESH_TRANSCRIBE_LIBRARY, res("lib", "transcribe", "libtranscribe.dylib"), join(HOME, "lib", "transcribe", "libtranscribe.dylib")),
   speakerModel: firstExisting(join(HOME, "models", "wespeaker_en.onnx"), res("models", "wespeaker_en.onnx")),
 };
 

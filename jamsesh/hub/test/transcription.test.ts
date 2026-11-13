@@ -515,16 +515,19 @@ test("the Parakeet process answers whisper.cpp's shape: {text} for a WAV, 400 fo
 });
 
 test("the room's hotwords become the model's vocabulary when it takes one, and nothing when it doesn't", async () => {
-  // One spelling per term (the hub sends each in both cases), junk removed, in the hub's order.
-  expect(vocabularyFrom("Chey/chey/JamSesh/jamsesh/left-hand nav/ /Chey/Fig<script>Craft")).toEqual(["Chey", "JamSesh", "left-hand nav", "Fig script Craft"]);
+  // One spelling per term (the hub sends each in both cases), junk removed, in the hub's order; only
+  // single words: the fork's rescoring of "left-hand nav" wrote "left-hand nav nav".
+  expect(vocabularyFrom("Chey/chey/JamSesh/jamsesh/left-hand nav/ /Chey/Fig<script>Craft/FigCraft/Felipe's Codex/left-hand")).toEqual(["Chey", "JamSesh", "FigCraft"]);
   // At most 64, the first ones: people and agents come first in the hub's list, so they're kept.
-  const many = vocabularyFrom(hotwords(buildVocabulary({ people: ["Chey", "Britt"], agents: ["Felipe's Codex"], terms: Array.from({ length: 300 }, (_, i) => `term${i}`) })));
+  const many = vocabularyFrom(hotwords(buildVocabulary({ people: ["Chey", "Britt"], agents: ["Felipe's Codex", "Pat"], terms: Array.from({ length: 300 }, (_, i) => `term${i}`) })));
   expect(many).toHaveLength(MAX_TERMS);
   expect(MAX_TERMS).toBe(64);
-  expect(many.slice(0, 3)).toEqual(["Chey", "Britt", "Felipe's Codex"]);
+  expect(many.slice(0, 4)).toEqual(["Chey", "Britt", "Pat", "term0"]);
   const takes = standIn(true);
   await takes.handle(post(withWav(clip, hotwords(ROOM))));
-  expect(takes.asked[0].vocabulary).toEqual(expect.arrayContaining(["Chey", "JamSesh", "FigCraft", "left-hand nav", "Felipe's Codex"]));
+  expect(takes.asked[0].vocabulary).toEqual(expect.arrayContaining(["Chey", "JamSesh", "FigCraft", "Passport"]));
+  expect(takes.asked[0].vocabulary).not.toContain("left-hand nav");
+  expect(takes.asked[0].vocabulary).not.toContain("Felipe's Codex");
   await takes.handle(post(withWav(clip)));
   expect(takes.asked[1].vocabulary).toBeUndefined();
   // Upstream transcribe.cpp's Parakeet takes none (only Hex's fork does): the words aren't sent.
@@ -556,15 +559,31 @@ test.skipIf(!MODEL || !FORK || !canSay)("end to end: Parakeet hears the room's w
   expect(r.text).toContain("Chey");
   expect(r.text).toContain("JamSesh");
   expect(r.text).toContain("FigCraft");
-  // A clip with none of the room's words comes out the same with the list as without it.
   const url = engines(hub).get("parakeet").url;
-  const plain = join(dir, "plain.wav");
-  Bun.spawnSync(["/usr/bin/say", "-o", plain, "--data-format=LEI16@16000", "The weather is nice today, so we will eat lunch outside by the river."]);
-  const plainWav = new Uint8Array(await Bun.file(plain).arrayBuffer());
-  const heard = async (hot?: string) => ((await (await fetch(`${url}/inference`, { method: "POST", body: withWav(plainWav, hot) })).json()) as { text: string }).text;
-  const without = await heard();
-  expect(without).toContain("weather");
-  expect(await heard(hotwords(hub.transcriber.vocabulary()))).toBe(without);
+  const say = async (name: string, text: string) => {
+    const f = join(dir, `${name}.wav`);
+    Bun.spawnSync(["/usr/bin/say", "-o", f, "--data-format=LEI16@16000", text]);
+    return new Uint8Array(await Bun.file(f).arrayBuffer());
+  };
+  const heard = async (wav: Uint8Array, hot?: string) => ((await (await fetch(`${url}/inference`, { method: "POST", body: withWav(wav, hot) })).json()) as { text: string }).text;
+  const words = hotwords(buildVocabulary({ people: ["Chey", "Britt", "Felipe"], brain: ["JamSesh"], terms: ["FigCraft", "Passport", "workstream", "payments", "left-hand nav"] }));
+  // The clip that once came out "left-hand nav nav": the multi-word term isn't rescored, the single words are.
+  const nav = await heard(await say("nav", "Felipe, can you move the left-hand nav into FigCraft, then send the passport menu to Britt so she can check the payments workstream before lunch."), words);
+  expect(nav).not.toMatch(/\b(\w+) \1\b/i);
+  expect(nav).toContain("left-hand nav into");
+  expect(nav).toContain("Britt");
+  // No false insertions: clips without the room's words, with words that look or sound like them, or
+  // with repeated words come out the same with the list as without it.
+  for (const [name, text] of [
+    ["plain", "The weather is nice today, so we will eat lunch outside by the river."],
+    ["brett", "Brett flew to Britain with his brother last spring."],
+    ["fig", "The fig jam at the craft fair was the best thing there."],
+    ["jam", "Jam, sesame seeds and bread are all we have for lunch."],
+    ["repeat", "Yes, yes, yes. We said yes to the plan, the whole plan."],
+  ] as const) {
+    const wav = await say(name, text);
+    expect(await heard(wav, words)).toBe(await heard(wav));
+  }
   // The child refuses what isn't a WAV, and a clip longer than a minute.
   const bad = new FormData();
   bad.append("file", new Blob(["not audio"]), "x.wav");

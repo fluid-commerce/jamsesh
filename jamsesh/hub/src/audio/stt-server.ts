@@ -6,6 +6,7 @@
 // which rescores the words Parakeet heard against the room's list.
 
 import { config } from "../config";
+import { verifiedLibrary } from "./transcribe-lib";
 import { decodeWav, resample } from "./wav";
 
 /** The longest clip it decodes; the pipeline's clips are 15 s at most. */
@@ -16,13 +17,14 @@ const RATE = 16_000;
 export const MAX_TERMS = 64;
 
 /**
- * The `transcribe-cpp` module. Inside the Mac app the hub is one compiled program, so it's found in
- * the bundled node_modules at run time, never bundled. When Hex's fork of the library is on this
- * Mac (config.transcribeLibrary), the binding loads it instead of its own (same C ABI), so Parakeet
- * takes the room's words.
+ * The `transcribe-cpp` module, bound to the pinned library (transcribe-lib.ts): whatever library an
+ * environment variable names is dropped first, and the binding is pointed at the verified one, so
+ * it loads nothing else. Inside the Mac app the hub is one compiled program, so the binding is found
+ * in the bundled node_modules at run time, never bundled.
  */
 export async function loadTranscribeCpp(): Promise<typeof import("transcribe-cpp")> {
-  if (config.transcribeLibrary && !process.env.TRANSCRIBE_LIBRARY) process.env.TRANSCRIBE_LIBRARY = config.transcribeLibrary;
+  delete process.env.TRANSCRIBE_LIBRARY;
+  process.env.TRANSCRIBE_LIBRARY = await verifiedLibrary(process.env, config.home);
   const where: string = config.nodeModules ? Bun.resolveSync("transcribe-cpp", config.nodeModules) : Bun.resolveSync("transcribe-cpp", import.meta.dir);
   await keepKoffiArrays(Bun.resolveSync("koffi", where));
   return await import(where);
@@ -40,7 +42,8 @@ async function keepKoffiArrays(koffiPath: string) {
   const make = koffi.array.bind(koffi);
   const kept = new Map<string, unknown>();
   koffi.array = (type: unknown, length: unknown, ...rest: unknown[]) => {
-    if (typeof type !== "string" || typeof length !== "number" || rest.length) return make(type, length, ...rest);
+    // Bounded: word lists are at most MAX_TERMS long; anything else is made as usual.
+    if (typeof type !== "string" || typeof length !== "number" || length > 256 || rest.length) return make(type, length, ...rest);
     const key = `${type}\u0000${length}`;
     if (!kept.has(key)) kept.set(key, make(type, length));
     return kept.get(key);
@@ -48,14 +51,19 @@ async function keepKoffiArrays(koffiPath: string) {
   koffi.__jamKept = true;
 }
 
-/** The hub's `hotwords` field ("Chey/chey/JamSesh/jamsesh/left-hand nav", people and agents first) as terms, in order, one per spelling, at most MAX_TERMS. */
+/**
+ * The hub's `hotwords` field ("Chey/chey/JamSesh/jamsesh/left-hand nav", people and agents first) as
+ * the model's vocabulary: single words only, in order, one per spelling, at most MAX_TERMS. A term of
+ * several words ("left-hand nav", "Felipe's Codex") isn't rescored: the fork's rescoring was seen to
+ * write "left-hand nav nav". Those stay with the correction pass, which gets the whole list.
+ */
 export function vocabularyFrom(hotwords: string): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   for (const raw of hotwords.slice(0, 4000).split("/")) {
     const term = raw.replace(/[^\p{L}\p{N}' .&-]+/gu, " ").replace(/\s+/g, " ").trim();
     const key = term.toLowerCase();
-    if (!term || seen.has(key)) continue;
+    if (!term || /[\s-]/.test(term) || seen.has(key)) continue;
     seen.add(key);
     out.push(term);
     if (out.length >= MAX_TERMS) break;
@@ -93,8 +101,15 @@ export function sttHandler(asr: SttModel) {
 }
 
 export async function runSttServer(model: string) {
-  const { TranscribeModel } = await loadTranscribeCpp();
-  const asr = await TranscribeModel.load(model);
+  let asr: Awaited<ReturnType<Awaited<ReturnType<typeof loadTranscribeCpp>>["TranscribeModel"]["load"]>>;
+  try {
+    const { TranscribeModel } = await loadTranscribeCpp();
+    asr = await TranscribeModel.load(model);
+  } catch (e) {
+    // The hub shows the last line of this as the reason, and whisper carries the room.
+    console.error((e instanceof Error ? e.message : String(e)).replace(/\s+/g, " "));
+    process.exit(1);
+  }
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, maxRequestBodySize: 8 * 1024 * 1024, fetch: sttHandler(asr) });
   console.log(`listening ${server.port}`);
   if (process.env.JAMSESH_STT_PARENT_PIPE === "1") {

@@ -1600,18 +1600,25 @@ In `auto` the engines are tried least-busy first, then in this order [B28]:
    `fastEngine` setting, host only, kept across sessions (unset means on; a room that turned it off
    keeps it off). NVIDIA's Parakeet TDT 0.6B v3 (Q8_0 GGUF, CC-BY-4.0) through transcribe.cpp (the
    `transcribe-cpp` npm package, MIT, pinned to an exact version), which runs it on the Mac's GPU
-   with Metal on Apple silicon (the CPU elsewhere). The native library is Hex's fork of transcribe.cpp
-   (`anomalyco/transcribe.cpp` at commit `bcb639fa`, MIT: 0.4.1 with the same C ABI plus Parakeet
-   vocabulary rescoring), built by `app/build-transcribe.sh` for arm64 with Metal (it checks the
-   commit and the binding's header hash, and stamps the libraries' SHA-256s) into the bundle's
-   `lib/transcribe`; the hub points the binding at it (`TRANSCRIBE_LIBRARY`). Found in order:
-   `JAMSESH_TRANSCRIBE_LIBRARY`, the app bundle, `~/.jamsesh/lib/transcribe` (`install.sh` builds it
-   there); without it Parakeet runs on the binding's own library, unbiased. The app bundles
+   with Metal on Apple silicon. The native library is Hex's fork of transcribe.cpp
+   (`anomalyco/transcribe.cpp`, MIT: 0.4.1 with the same C ABI plus Parakeet vocabulary rescoring),
+   pinned in `app/transcribe-pins.json` (the commit, the binding's header hash and each library's
+   SHA-256), which the hub compiles in and `app/build-transcribe.sh` reads. The build is
+   reproducible (fixed work folder, source paths mapped, archive dates zeroed) and installs nothing
+   that doesn't match the pins; it assembles the set beside the output and moves it into place whole.
+   `bundle-hub.sh` builds it into the bundle's `lib/transcribe`, `install.sh` into
+   `~/.jamsesh/lib/transcribe` (`--check` compares with the pins). Only that build loads: at every
+   start, Parakeet's process drops any `TRANSCRIBE_LIBRARY` it inherited and points the binding at a
+   verified folder: inside the Mac app, the app's own `lib/transcribe` and nothing else (the real path
+   must be inside its resources; `JAMSESH_TRANSCRIBE_LIBRARY` is ignored); in a checkout,
+   `JAMSESH_TRANSCRIBE_LIBRARY` or `~/.jamsesh/lib/transcribe`. Every pinned file must be a regular
+   file there with its pinned SHA-256 (`hub/src/audio/transcribe-lib.ts`). Otherwise Parakeet
+   doesn't start, **Settings** says why, and whisper carries the room. The app bundles
    `transcribe-cpp`, its FFI library koffi and the darwin-arm64 package beside sherpa-onnx (which
-   stays for voiceprints); the compiled hub finds them in its bundled `node_modules` at run time, and
-   the release build checks they load and that the library is the fork's (`jamsesh-hub --stt-check`).
-   Under Bun a garbage-collected koffi type aborts the process, so the hub makes each word-list array
-   type once and keeps it. On the first host session it downloads the model once (one
+   stays for voiceprints); the compiled hub finds them in its bundled `node_modules`, and the release
+   build checks the fork's library is the one loaded (`jamsesh-hub --stt-check`). Under Bun a
+   garbage-collected koffi type aborts the process, so the hub makes each word-list array type once
+   and keeps it. A child that doesn't say it's listening within 90 seconds is stopped. On the first host session it downloads the model once (one
    GGUF file from Hugging Face, `handy-computer/parakeet-tdt-0.6b-v3-gguf` at a fixed revision,
    checked against a pinned size and SHA-256 by the same code as whisper's) into
    `~/.jamsesh/models/parakeet-tdt-0.6b-v3-q8_0`, with progress in Settings, while the engines below
@@ -1680,9 +1687,11 @@ names, the brain's names, active workstream titles, glossary terms, and the room
 (**Settings > Transcription > Words to listen for**, the `vocabulary` setting, kept across
 sessions). A line in that list is a word ("FigCraft") or a word and how it gets misheard
 ("Chey: Shay"). Parakeet's process takes the list as hotwords and passes it to the model as its
-vocabulary when the model takes one (`supports("vocabulary")`, true with Hex's fork): one spelling
-per term, the first 64 (people, then agents, the brain's names, the room's list, glossary,
-workstreams), at the fork's default strength (2.5 nats per piece). After its greedy decode the fork
+vocabulary when the model takes one (`supports("vocabulary")`, true with Hex's fork): single-word
+terms only, one spelling each, the first 64 (people, then agents, the brain's names, the room's
+list, glossary, workstreams), at the fork's default strength (2.5 nats per piece). Terms of several
+words ("left-hand nav") aren't rescored: the fork wrote "left-hand nav nav"; the correction pass
+handles them. After its greedy decode the fork
 finds spans of 1 to 4 words that look or sound like a term and writes the term where the audio
 scores it within that boost of what was heard; a clip without such a span is unchanged. The
 "heard as" spellings aren't passed (the 0.4.1 binding has no way to), so the correction pass fixes

@@ -86,6 +86,10 @@ export class Parakeet {
   constructor(private helpers?: HelperRegistry) {}
 
   private proc: ReturnType<typeof Bun.spawn> | null = null;
+  /** How long the child has to print "listening <port>" once it's started. */
+  startTimeoutMs = 90_000;
+  /** The child's command line (a test swaps it for a child that misbehaves). */
+  argv: (dir: string) => string[] = serverArgv;
   private state: ModelState = "off";
   private detail = "Off. Turn on the faster engine in Settings.";
   private progress: number | null = null;
@@ -168,7 +172,7 @@ export class Parakeet {
   private async spawn(dir: string): Promise<string> {
     this.helpers?.assertOpen(); // the hub is stopping: no new helper (checked right before the spawn)
     // Its stdin is a pipe from the hub, so it ends when the hub does, even after kill -9 or a crash.
-    const proc = Bun.spawn(serverArgv(dir), { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, JAMSESH_STT_PARENT_PIPE: "1" } });
+    const proc = Bun.spawn(this.argv(dir), { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, JAMSESH_STT_PARENT_PIPE: "1" } });
     this.proc = proc;
     this.helpers?.track(proc);
     // Keep the end of its error output for the reason, and keep the pipe drained so it never blocks.
@@ -187,15 +191,19 @@ export class Parakeet {
         if (m) return Number(m[1]);
       }
     })();
-    const port = await Promise.race([ready, Bun.sleep(90_000).then(() => null)]);
-    reader.releaseLock();
+    const port = await Promise.race([ready, Bun.sleep(this.startTimeoutMs).then(() => null)]);
     if (!port) {
-      void stopHelper(proc);
+      // A child that stayed silent: the pending read is cancelled and settles before the lock goes, then the child is stopped.
+      await reader.cancel().catch(() => {});
+      await ready.catch(() => null);
+      reader.releaseLock();
+      await stopHelper(proc);
       this.proc = null;
       await Bun.sleep(300);
       const why = tail.trim().split("\n").pop()?.slice(0, 160);
       throw new Error(`The speech model didn't start${why ? `: ${why}` : "."}`);
     }
+    reader.releaseLock();
     void proc.exited.then((code) => {
       if (this.stopped || this.proc !== proc) return;
       this.proc = null;
