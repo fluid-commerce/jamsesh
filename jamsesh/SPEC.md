@@ -1520,6 +1520,17 @@ Every client window and the big screen capture audio; it's consolidated on the h
   It learns each device's lag. A copy that arrives up to 15 seconds late still joins its
   utterance; it can improve the text (when it's clearer by more than 6 dB) and the speaker, and
   updates the same line in place [A2].
+- **The first copy shows at once.** The first copy of a stretch of speech is transcribed as soon as it arrives and shown
+  right away as an early line (dimmed), under the id its settled line will keep. It is display only: it lives in memory
+  (`session.previews`), is never stored, is not an event, and is not sent to agents, so the brain, directives, routing and
+  the wiki act once, on the settled line, when the window closes. The settled line replaces it in place (text, speaker,
+  laptops); a line the rules above would drop (an echo, a twin, the join read, no words) is never shown early, and one
+  that was is taken back. Early lines have `settled: false`; stored lines have no such field.
+- **Who is talking.** A microphone that hears speech start tells the hub (`speaking`, with a coarse level five times a
+  second at most); the hub shows "Ana is talking" with a few level bars under the room's lines, in every person's window
+  and on the big screen. One talker for the room (the laptop that hears the voice loudest; each remote laptop its own); a
+  muted mic shows nothing and an unnamed laptop reads "Someone". It goes when that person's line shows, or a second after
+  their speech ends. Never stored, never sent to agents.
 - The **cleanest copy** has the highest `0.7 × SNR + 0.3 × level` [B33]. It is always transcribed.
 - **Copies that could be someone else.** Grouping by time can put two people talking at once on
   different laptops into one group. So another copy is transcribed too when it could be different
