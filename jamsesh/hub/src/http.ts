@@ -202,8 +202,25 @@ const bad = (msg: string, status = 400) => json({ error: msg }, status);
 const CLOSING = "The room is closing. Try again once it is open.";
 
 /** The live state for whoever asked: an agent's copy leaves out the Tasks board's proposals. */
+/**
+ * The one place that decides what an agent may hear of the room's lines and who is talking: stored, settled lines only.
+ * Early copies, their retractions and the talking indicator are display only (`settled === false`), for people's windows.
+ * Every utterance-shaped message and list an agent receives goes through here.
+ */
+const settledOnly = (u: { settled?: boolean }) => u.settled !== false;
+export function forAgent(msg: BusMessage): BusMessage | null {
+  if (msg.type === "talking" || msg.type === "utterance-retracted") return null;
+  if (msg.type === "utterance") return settledOnly(msg.utterance) ? msg : null;
+  if (msg.type === "patch" && msg.key === "utterances") return { ...msg, value: (msg.value as { settled?: boolean }[]).filter(settledOnly) };
+  return msg;
+}
+
 function forCaller<T extends { triage: unknown }>(state: T, agent: boolean): T {
-  return agent ? { ...state, triage: [] } : state;
+  // Nor the early copy of a line still settling (display only): an agent acts on what was settled.
+  if (!agent) return state;
+  const list = (state as any).utterances;
+  const kept = list ? ((forAgent({ type: "patch", key: "utterances", value: list }) as { value: unknown[] }).value) : list;
+  return { ...state, triage: [], utterances: kept };
 }
 
 function isLocal(ip: string) {
@@ -572,11 +589,20 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
             msg = { ...msg, event: { ...msg.event, data } };
           }
           if (agent && msg.type === "patch" && msg.key === "triage") return;
+          // Who is talking and early copies of lines are for people's windows to show; agents hear lines once they are settled.
+          if (agent) {
+            const allowed = forAgent(msg);
+            if (!allowed) return;
+            msg = allowed;
+          }
           // A proposal is for people to approve: agents hear of wiki changes only once they are written.
           if (agent && msg.type === "wiki" && msg.kind === "ingest") return;
           ws.send(JSON.stringify(msg));
         });
         (ws as any).off = off;
+        // A window that connects (or reconnects) mid-sentence learns who is talking now.
+        const now = agent ? [] : hub.speaking.talkers();
+        if (now.length) ws.send(JSON.stringify({ type: "talking", talkers: now } satisfies BusMessage));
         if (ws.data.deviceId) {
           const set = sockets.get(ws.data.deviceId) ?? new Set();
           set.add(ws);
@@ -590,9 +616,12 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         }
         try {
           const m = JSON.parse(String(raw));
-          const me = m.type === "level" || m.type === "rtc" ? speaker(hub, ws) : null;
+          const me = m.type === "level" || m.type === "rtc" || m.type === "speaking" ? speaker(hub, ws) : null;
           if (m.type === "level" && me) {
             bus.send({ type: "level", deviceId: me, level: m.level });
+          } else if (m.type === "speaking" && me) {
+            // Display only: kept in memory, never stored, never sent to agents.
+            hub.speaking.update(me, m.on === true, Number(m.level));
           } else if (m.type === "ping") ws.send(JSON.stringify({ type: "pong", t: m.t, now: Date.now(), voiceEpoch: hub.session.store.voiceEpoch() }));
           else if (m.type === "drive") driveFrom(ws, hub, m);
           else if (m.type === "rtc" && me && typeof m.to === "string") {
@@ -615,6 +644,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           sockets.get(ws.data.deviceId)?.delete(ws);
           if (!sockets.get(ws.data.deviceId)?.size) {
             sockets.delete(ws.data.deviceId);
+            hub.speaking.drop(ws.data.deviceId);
             // A window closing while the room shuts down finds the store sealed: nothing left to tidy.
             try {
               s.touchDevice(ws.data.deviceId, { micOn: false, level: 0 });

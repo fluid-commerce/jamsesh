@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState
 import qrcode from "qrcode-generator";
 import { readPref } from "./identity";
 import { useSilent } from "./sound";
-import { ago, api, hub, useHub, type Agent, type Artifact, type Directive, type FontInfo, type HubState, type JamEvent, type Person, type Share } from "./hub";
+import { ago, api, hub, useHub, type Agent, type Artifact, type Directive, type FontInfo, type HubState, type JamEvent, type Person, type Share, type Talker, type Utterance } from "./hub";
 import { useArtSrc } from "./frames";
 import { FeedAttachments } from "./attach";
 import { isOpaqueFrame, pointerRecording } from "./pointer";
@@ -536,13 +536,65 @@ export class Generation {
   }
 }
 
+/**
+ * The first copies of speech still settling (see the hub's pipeline), shaped like feed lines so they render through the same
+ * path. An early line is display only: it goes once its settled line is in the list (the event carries the same utterance id),
+ * and a line the hub took back (settled, no words) never shows. They come last: they are the newest speech.
+ */
+export function earlyLines(utterances: Utterance[], events: JamEvent[]): JamEvent[] {
+  const settled = new Set<string>();
+  for (const e of events) if (e.data?.utteranceId) settled.add(e.data.utteranceId);
+  return utterances
+    .filter((u) => u.settled === false && u.text && !settled.has(u.id))
+    .sort((a, b) => a.t0 - b.t0)
+    .map((u, i) => ({
+      id: -1 - i,
+      ts: u.t0,
+      kind: "speech" as const,
+      authorType: "person" as const,
+      authorId: u.personId,
+      authorName: u.speakerName,
+      text: u.text,
+      relevance: null,
+      workstreamId: null,
+      data: { utteranceId: u.id, confidence: u.confidence, method: u.method, source: "overheard", early: true },
+    }));
+}
+
+/** A line keeps its place on screen when its early copy settles: both are keyed by the utterance. */
+export const feedKey = (e: JamEvent) => (e.kind === "speech" && e.data?.utteranceId ? `u:${e.data.utteranceId}` : e.id);
+
+/** A coarse level (0 to 1) as the height of a bar, in px. */
+export const barHeight = (level: number, live: boolean) => (live ? 3 + Math.round(Math.min(1, Math.max(0, level)) * 9) : 3);
+
+/** "Ana is talking" with a few thin level bars, in the room's conversation column. Its box is always there, so it never moves a line. */
+export function TalkingStrip({ talkers, big }: { talkers: Talker[]; big?: boolean }) {
+  const shown = talkers.slice(0, 2);
+  return (
+    <div className={`feed-talking ${big ? "big" : ""}`} aria-live="polite">
+      {shown.map((t) => (
+        <span key={t.deviceId} className={`talk ${t.live ? "" : "ended"}`} style={{ "--who": t.color || "var(--muted)" } as React.CSSProperties}>
+          <span className="bars" aria-hidden="true">
+            {[0, 1, 2, 3].map((i) => (
+              <i key={i} style={{ height: barHeight(t.level, t.live), animationDelay: `${i * -0.17}s` }} />
+            ))}
+          </span>
+          <span className="t">
+            <span className="n">{t.name}</span> is talking
+          </span>        </span>
+      ))}
+      {talkers.length > shown.length && <span className="talk more">+{talkers.length - shown.length}</span>}
+    </div>
+  );
+}
+
 export function RoomFeed(props: { big?: boolean; editable?: boolean; filter?: "all" | "room" }) {
   // A different room starts a fresh feed: what was seen, loaded and scrolled belongs to the old one.
   return <RoomFeedOf key={useHub().state?.session.roomId} {...props} />;
 }
 
 function RoomFeedOf({ big, editable, filter = "all" }: { big?: boolean; editable?: boolean; filter?: "all" | "room" }) {
-  const { state, removed } = useHub();
+  const { state, removed, talkers, connected } = useHub();
   const box = useRef<HTMLDivElement>(null);
   const [pop, setPop] = useState<{ ev: JamEvent; x: number; y: number } | null>(null);
   // Every line this window has seen, so lines the live state trims (or the reader loaded) stay put.
@@ -574,7 +626,9 @@ function RoomFeedOf({ big, editable, filter = "all" }: { big?: boolean; editable
   if (capFeed(seen.current, following.current) === "oldest") trimmed.current = true;
   const all = [...seen.current.values()].sort((a, b) => a.id - b.id).filter(wanted);
   const events = big ? all.slice(-140) : all;
+  const early = state ? earlyLines(state.utterances, events).filter(wanted) : [];
   const last = events[events.length - 1]?.id ?? 0;
+  const earlyKey = early.map((e) => e.data.utteranceId).join();
   const first = historyCursor(seen.current.keys());
   const everything = !!state && state.totals.events <= state.events.length;
   const exhausted = big || ((older.done || everything) && !trimmed.current);
@@ -648,7 +702,7 @@ function RoomFeedOf({ big, editable, filter = "all" }: { big?: boolean; editable
     if (following.current) {
       toBottom();
     }
-  }, [last]);
+  }, [last, earlyKey]);
 
   // The away count is bumped at the wire, one event at a time, so a burst can't push lines out of the state window uncounted.
   const wantedRef = useRef<(e: JamEvent) => boolean>(() => false);
@@ -700,17 +754,19 @@ function RoomFeedOf({ big, editable, filter = "all" }: { big?: boolean; editable
   return (
     <div className="feed-wrap">
       <div ref={box} className="feed" onScroll={onScroll} style={{ fontSize: big ? 17 : 14 }}>
-        {events.length === 0 && <div className="empty-note">The room's conversation shows up here as people talk.</div>}
+        {events.length === 0 && early.length === 0 && <div className="empty-note">The room's conversation shows up here as people talk.</div>}
         {!exhausted && first != null && (
           <button className="feed-older" disabled={older.loading} onClick={() => void loadOlder()}>
             {older.loading ? "Loading earlier lines" : older.failed ? "Couldn't load earlier lines. Try again" : older.more ? `${older.more} earlier ${older.more === 1 ? "line" : "lines"}` : "Earlier lines"}
           </button>
         )}
-        {events.map((e) => (
-          <FeedLine key={e.id} e={e} state={state} editable={editable} condensed={big} onSpeaker={(ev, x, y) => setPop({ ev, x, y })} />
+        {[...events, ...(following.current ? early : [])].map((e) => (
+          <FeedLine key={feedKey(e)} e={e} state={state} editable={editable && !e.data.early} condensed={big} onSpeaker={(ev, x, y) => setPop({ ev, x, y })} />
         ))}
         {pop && <SpeakerPopover state={state} ev={pop.ev} x={pop.x} y={pop.y} onClose={() => setPop(null)} />}
       </div>
+      {/* Who is talking right now: a strip of its own under the lines, so it never moves one. */}
+      <TalkingStrip talkers={connected ? talkers : []} big={big} />
       {away && !big && (
         <button className="feed-latest" onClick={jump} aria-label={gap ? "Jump to the latest, you may have missed lines" : fresh ? `Jump to the latest, ${fresh} new` : "Jump to the latest"}>
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -752,7 +808,7 @@ function FeedLine({ e, state, editable, condensed, onSpeaker }: { e: JamEvent; s
   const unsure = e.kind === "speech" && !e.data.typed && (e.data.confidence ?? 1) < 0.55 && e.data.method !== "manual";
   const who =
     e.kind === "brain" ? state.settings.brainName : e.kind === "prompt" ? `${e.authorName} → ${shortAgent(e.data.agentName)}` : e.authorName;
-  const cls = [e.kind === "update" || e.kind === "message" || e.kind === "artifact" ? "agent" : "", e.kind === "prompt" ? "prompt" : "", e.relevance ?? ""].join(" ");
+  const cls = [e.kind === "update" || e.kind === "message" || e.kind === "artifact" ? "agent" : "", e.kind === "prompt" ? "prompt" : "", e.relevance ?? "", e.data.early ? "early" : ""].join(" ");
   return (
     <div className={`line ${cls}`}>
       {editable && e.kind === "speech" && e.data.utteranceId ? (

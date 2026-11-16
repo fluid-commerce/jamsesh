@@ -1,5 +1,5 @@
-// Speech to text. Order: Parakeet on the host when the room turned on the faster engine (5.2),
-// local whisper.cpp (the default), whisper servers that client machines offer, then the gateway. A pool spreads work across whoever is free. Every engine is
+// Speech to text. Order: Parakeet on the host (the faster engine, 5.2: on unless the room turns it off),
+// local whisper.cpp (the fallback, and the engine for other languages), whisper servers that client machines offer, then the gateway. A pool spreads work across whoever is free. Every engine is
 // biased toward the room's vocabulary, and its text goes through the same correction pass.
 import { HelperRegistry } from "../children";
 import { transcribe as aiTranscribe } from "ai";
@@ -8,14 +8,14 @@ import { config } from "../config";
 import type { Session } from "../session";
 import { describeError, gateway } from "../brain/llm";
 import { brainNames } from "../names";
-import { Parakeet } from "./parakeet";
+import { Parakeet, PARAKEET_LANGUAGES } from "./parakeet";
 import { LocalWhisper, ping, whisperPort } from "./whisper";
 import { buildVocabulary, correctTranscript, hotwords, promptWith, type VocabEntry } from "./vocabulary";
 
 interface Engine {
   id: string;
   label: string;
-  /** parakeet takes hotwords and English only; whisper engines take a prompt. */
+  /** parakeet takes hotwords and the languages Parakeet v3 knows; whisper engines take a prompt and any language. */
   kind: "parakeet" | "local" | "worker";
   url: string;
   inflight: number;
@@ -118,8 +118,8 @@ export class Transcriber {
 
   /** Healthy engines that can take this session's language, least busy first, then by preference. */
   private pool() {
-    const english = this.language() === "en";
-    return [...this.engines.values()].filter((e) => e.failures < 3 && (e.kind !== "parakeet" || english)).sort((a, b) => a.inflight - b.inflight || RANK[a.kind] - RANK[b.kind]);
+    const parakeetCan = PARAKEET_LANGUAGES.has(this.language());
+    return [...this.engines.values()].filter((e) => e.failures < 3 && (e.kind !== "parakeet" || parakeetCan)).sort((a, b) => a.inflight - b.inflight || RANK[a.kind] - RANK[b.kind]);
   }
 
   private fastWanted() {
@@ -132,7 +132,7 @@ export class Transcriber {
   private fastGen = 0;
   private startingGen = -1;
   /**
-   * Starts or stops Parakeet to match the "Faster engine" setting (off by default). Turning it on
+   * Starts or stops Parakeet to match the "Faster engine" setting (on by default). Turning it on
    * downloads the model the first time (minutes, never offline) while whisper or the gateway carry
    * the room; once it's ready it goes first. Resolves with whether it's running. Off then on while it
    * was starting: the stopped start winds down first, then it starts again.

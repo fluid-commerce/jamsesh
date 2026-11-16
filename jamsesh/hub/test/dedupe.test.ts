@@ -30,7 +30,7 @@ function room() {
   for (const id of ["lap-a", "lap-b", "lap-c"]) session.touchDevice(id, { label: id, micOn: true, location: "room", kind: "client" });
   const said = new Map<string, string>();
   const transcriber = { transcribe: async (wav: Uint8Array) => ({ text: said.get(String(Bun.hash(wav))) ?? "", engine: "stub" }) } as any;
-  const pipeline = new AudioPipeline(session, transcriber);
+  const pipeline = new AudioPipeline(session, transcriber, () => false);
   /** One copy of a line, heard by `deviceId` with its own clock, transcribed as `text`. */
   const hear = async (deviceId: string, t0: number, seconds: number, text: string, seed: number) => {
     const wav = encodeWav({ sampleRate: 16000, samples: speech(seconds, seed) });

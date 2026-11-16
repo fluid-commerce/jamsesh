@@ -583,6 +583,77 @@ textarea:focus {
   cursor: pointer;
 }
 
+/* Early copies of speech still settling: the same line, a little quieter until the room has heard it all. */
+.line .what {
+  transition: opacity 0.4s ease;
+}
+.line.early .what {
+  opacity: 0.72;
+}
+
+/* "Ana is talking": a strip of its own under the lines, always there, so a line never moves when it comes and goes. */
+.feed-talking {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 26px;
+  padding: 0 10px;
+  overflow: hidden;
+  font-size: 13px;
+  color: var(--dim);
+  white-space: nowrap;
+}
+.feed-talking.big {
+  height: 32px;
+  font-size: 15px;
+}
+.feed-talking .talk {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  animation: fadein 0.2s ease both;
+}
+.feed-talking .talk.ended {
+  opacity: 0.55;
+  transition: opacity 0.3s ease;
+}
+.feed-talking .t {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.feed-talking .n {
+  font-weight: 600;
+  color: var(--who);
+}
+.feed-talking .bars {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 14px;
+  flex: none;
+}
+.feed-talking .bars i {
+  width: 2px;
+  border-radius: 1px;
+  background: var(--who);
+  transform-origin: center;
+  transition: height 0.2s ease;
+  animation: talkbar 0.8s ease-in-out infinite;
+}
+.feed-talking .talk.ended .bars i {
+  animation: none;
+}
+@keyframes talkbar {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(0.55); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .feed-talking .bars i { animation: none; }
+}
+
 .feed-latest:hover {
   background: var(--panel-2);
 }

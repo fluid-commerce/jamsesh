@@ -1,9 +1,10 @@
-// Parakeet (5.2): NVIDIA's Parakeet TDT 0.6B v2 speech model, the host's opt-in faster engine
-// (Settings > Transcription; whisper.cpp is the default until real-room clips decide). It runs through
-// sherpa-onnx, the library the app already ships for voiceprints, so there's no new runtime. The
-// model (482 MB) is downloaded the first time a host needs it, into ~/.jamsesh/models, and checked
-// against a pinned hash. It runs in a child process (stt-server.ts): a decode never blocks the hub,
-// and its memory (about 2 GB) goes back when the hub stops.
+// Parakeet (5.2): NVIDIA's Parakeet TDT 0.6B v3 speech model (25 European languages), the host's
+// default engine (Settings > Transcription > Faster engine, on unless the room turns it off). It runs
+// through transcribe.cpp (the `transcribe-cpp` package) on the Mac's GPU (Metal). The model (740 MB,
+// one GGUF file) is downloaded the first time a host needs it, into ~/.jamsesh/models, and checked
+// against a pinned size and hash; whisper.cpp or the gateway carry the room until it's ready. It runs
+// in a child process (stt-server.ts): a decode never blocks the hub, and its memory goes back when
+// the hub stops.
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -13,15 +14,21 @@ import { downloadVerified, sha256File, type ModelState, type ModelStatus } from 
 
 export type { ModelState, ModelStatus };
 
+/** The GGUF file, from handy-computer's Hugging Face repository at a fixed revision (an immutable URL). */
+const GGUF = "parakeet-tdt-0.6b-v3-Q8_0.gguf";
+
 export const PARAKEET = {
-  name: "parakeet-tdt-0.6b-v2-int8",
-  label: "Parakeet TDT 0.6B v2",
-  url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2",
-  sha256: "157c157bc51155e03e37d2466522a3a737dd9c72bb25f36eb18912964161e1ad",
-  bytes: 482_468_385,
-  files: ["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"],
-  licence: "Model CC-BY-4.0 (NVIDIA), converted by sherpa-onnx (Apache-2.0)",
+  name: "parakeet-tdt-0.6b-v3-q8_0",
+  label: "Parakeet TDT 0.6B v3",
+  url: `https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf/resolve/d8d8c32cb2017c57e5307767343e97870f8a7f53/${GGUF}`,
+  sha256: "5859f77944efcd8eafa23a6350731960b2b55b2203df51f319665c807d802cc7",
+  bytes: 739_508_576,
+  files: [GGUF],
+  licence: "Model CC-BY-4.0 (NVIDIA), converted to GGUF by transcribe.cpp (MIT)",
 };
+
+/** The languages Parakeet TDT 0.6B v3 transcribes (its model card); any other, and "auto", go to whisper. */
+export const PARAKEET_LANGUAGES: ReadonlySet<string> = new Set(["bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu", "it", "lv", "lt", "mt", "pl", "pt", "ro", "ru", "sk", "sl", "es", "sv", "uk"]);
 
 const has = (dir: string) => PARAKEET.files.every((f) => existsSync(join(dir, f)));
 
@@ -34,13 +41,13 @@ export function findModel(): string | null {
 
 const MANIFEST = ".files.sha256.json";
 
-/** The SHA-256 of every model file, recorded when the verified archive was unpacked. */
+/** The SHA-256 of every model file, recorded when the verified download was installed. */
 export const writeManifest = async (dir: string) => writeFileSync(join(dir, MANIFEST), JSON.stringify(Object.fromEntries(await Promise.all(PARAKEET.files.map(async (f) => [f, await sha256File(join(dir, f))])))));
 
 /**
  * Whether the unpacked files are still the ones that were verified. A managed folder without a
  * readable manifest can't be verified, so it isn't intact (the caller reinstalls it from the pinned
- * archive); a chosen folder or the app bundle is the person's own and isn't second-guessed.
+ * download); a chosen folder or the app bundle is the person's own and isn't second-guessed.
  */
 export async function installedIntact(dir: string, managed = true): Promise<boolean> {
   if (!managed) return true;
@@ -65,7 +72,8 @@ function samePath(a: string, b: string) {
 
 /** How to start the child: this binary with a flag when compiled, otherwise bun on the script. */
 function serverArgv(dir: string): string[] {
-  return import.meta.dir.includes("$bunfs") ? [process.execPath, "--stt-server", dir] : [process.execPath, join(import.meta.dir, "stt-server.ts"), dir];
+  const model = join(dir, GGUF);
+  return import.meta.dir.includes("$bunfs") ? [process.execPath, "--stt-server", model] : [process.execPath, join(import.meta.dir, "stt-server.ts"), model];
 }
 
 /** Moves a model folder JamSesh can't vouch for out of the way, keeping it (the name says why), so nothing a person put there is lost. */
@@ -78,6 +86,10 @@ export class Parakeet {
   constructor(private helpers?: HelperRegistry) {}
 
   private proc: ReturnType<typeof Bun.spawn> | null = null;
+  /** How long the child has to print "listening <port>" once it's started. */
+  startTimeoutMs = 90_000;
+  /** The child's command line (a test swaps it for a child that misbehaves). */
+  argv: (dir: string) => string[] = serverArgv;
   private state: ModelState = "off";
   private detail = "Off. Turn on the faster engine in Settings.";
   private progress: number | null = null;
@@ -142,15 +154,11 @@ export class Parakeet {
     const work = mkdtempSync(join(models, ".parakeet-"));
     try {
       this.set("downloading", `Downloading the speech model (${Math.round(PARAKEET.bytes / 1e6)} MB, once).`, 0);
-      const archive = join(work, "model.tar.bz2");
-      await downloadVerified(PARAKEET, archive, (pct) => (this.progress = pct), gone);
-      if (gone()) throw new Error("stopped");
-      const tar = Bun.spawnSync(["tar", "-xjf", archive, "-C", work], { stdout: "ignore", stderr: "pipe" });
-      if (tar.exitCode !== 0) throw new Error(`Couldn't unpack the speech model: ${tar.stderr.toString().trim().slice(0, 120)}`);
-      const unpacked = join(work, `sherpa-onnx-nemo-${PARAKEET.name}`);
-      if (!has(unpacked)) throw new Error("The speech model archive is missing files.");
+      const unpacked = join(work, PARAKEET.name);
+      mkdirSync(unpacked);
+      await downloadVerified(PARAKEET, join(unpacked, GGUF), (pct) => (this.progress = pct), gone);
       const dest = join(models, PARAKEET.name);
-      if (gone()) throw new Error("stopped"); // turned off during the download or unpack: nothing is installed
+      if (gone()) throw new Error("stopped"); // turned off during the download: nothing is installed
       if (existsSync(dest)) setAside(dest);
       await writeManifest(unpacked);
       if (gone()) throw new Error("stopped");
@@ -164,7 +172,7 @@ export class Parakeet {
   private async spawn(dir: string): Promise<string> {
     this.helpers?.assertOpen(); // the hub is stopping: no new helper (checked right before the spawn)
     // Its stdin is a pipe from the hub, so it ends when the hub does, even after kill -9 or a crash.
-    const proc = Bun.spawn(serverArgv(dir), { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, JAMSESH_STT_PARENT_PIPE: "1" } });
+    const proc = Bun.spawn(this.argv(dir), { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, JAMSESH_STT_PARENT_PIPE: "1" } });
     this.proc = proc;
     this.helpers?.track(proc);
     // Keep the end of its error output for the reason, and keep the pipe drained so it never blocks.
@@ -183,15 +191,19 @@ export class Parakeet {
         if (m) return Number(m[1]);
       }
     })();
-    const port = await Promise.race([ready, Bun.sleep(90_000).then(() => null)]);
-    reader.releaseLock();
+    const port = await Promise.race([ready, Bun.sleep(this.startTimeoutMs).then(() => null)]);
     if (!port) {
-      void stopHelper(proc);
+      // A child that stayed silent: the pending read is cancelled and settles before the lock goes, then the child is stopped.
+      await reader.cancel().catch(() => {});
+      await ready.catch(() => null);
+      reader.releaseLock();
+      await stopHelper(proc);
       this.proc = null;
       await Bun.sleep(300);
       const why = tail.trim().split("\n").pop()?.slice(0, 160);
       throw new Error(`The speech model didn't start${why ? `: ${why}` : "."}`);
     }
+    reader.releaseLock();
     void proc.exited.then((code) => {
       if (this.stopped || this.proc !== proc) return;
       this.proc = null;

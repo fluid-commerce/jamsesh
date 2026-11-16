@@ -639,6 +639,23 @@ export interface Utterance {
   location: "room" | "remote";
   eventId: number | null;
   engine: string;
+  /**
+   * false: the first copy of the speech, shown to windows while the room's other copies are still on their way.
+   * Display only: never stored and never acted on. Absent (every stored line) means settled.
+   */
+  settled?: boolean;
+}
+
+/** Someone whose microphone has just heard them start talking (display only: never stored, never sent to agents). */
+export interface Talker {
+  deviceId: string;
+  personId: string | null;
+  name: string;
+  color: string;
+  /** 0 to 1, coarse. */
+  level: number;
+  /** false: they stopped; the indicator stays a moment in case their line is about to appear. */
+  live: boolean;
 }
 
 export interface Settings {
@@ -663,7 +680,7 @@ export interface Settings {
   hostControl: boolean;
   /** Spoken language for transcription: an ISO code ("en" by default) or "auto". */
   language: string;
-  /** The opt-in faster engine (Parakeet, English only, a 482 MB download and about 2 GB of memory). */
+  /** The faster engine (Parakeet TDT 0.6B v3 on the GPU, 25 European languages, a 740 MB download): on unless the room turns it off. */
   fastEngine: boolean;
   /** The room's words for transcription (5.2): "Term" or "Term: heard as, heard as" ("Chey: Shay"). */
   vocabulary: string[];
@@ -807,6 +824,9 @@ export type BusMessage =
   | { type: "toast"; text: string; tone: "info" | "directive" | "decision" | "warn"; detail?: string }
   | { type: "speak"; audio: string | null; text: string; mime: string }
   | { type: "level"; deviceId: string; level: number }
+  | { type: "talking"; talkers: Talker[] }
+  /** An early line that did not become a line: windows remove it by id (display only, never sent to agents). */
+  | { type: "utterance-retracted"; id: string }
   | { type: "thinking"; on: boolean; label?: string }
   | { type: "rtc"; from: string; to: string; data: any }
   | { type: "drive"; screen: string; personId: string; name: string; color: string; ev: DriveEvent; t: number }

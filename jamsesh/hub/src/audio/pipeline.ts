@@ -70,6 +70,14 @@ interface Group {
    * and wording stay as they are; copies only add their devices.
    */
   adopted?: boolean;
+  /**
+   * The line shown from this group's first transcribed copy while the rest of the room's copies are still on their way
+   * (see preview). Display only: it lives in session.previews, never in the store, and nothing acts on it. The settled
+   * line (show) takes over its id and replaces it in place.
+   */
+  previewId: string | null;
+  /** The copy that line was made from. */
+  preview: Segment | null;
 }
 
 /** Who corrected a line: the host's own window, or a person's window (null: neither, e.g. the brain). */
@@ -150,12 +158,16 @@ export class AudioPipeline {
   stats = { lines: 0, voice: 0, someone: 0 };
   /** Called with each new or updated room line. */
   onLine: ((u: Utterance, isNew: boolean) => void) | null = null;
+  /** Called when a line is shown to the room's windows, early copy or settled (the talking indicator gives way to it). Display only. */
+  onShown: ((u: Utterance) => void) | null = null;
   /** Counts a transcription as work in flight (Hub.track), so shutdown waits for its line. */
   track: <T>(work: Promise<T>) => Promise<T> = (work) => work;
 
   constructor(
     private session: Session,
     private transcriber: Transcriber,
+    /** The hub's live recording state, required: while any recording is open, nothing is shown early (lines settle as they always did). */
+    private recordingActive: () => boolean,
   ) {
     this.voiceprints = new Voiceprints(session.store);
   }
@@ -239,7 +251,7 @@ export class AudioPipeline {
     // mergeTwin drops it only when its words are that line's, from other laptops.
     let g = this.open.find((x) => near(x) && overlaps(x, seg));
     if (!g) {
-      g = { id: newId("grp"), segments: [], t0: seg.t0, t1: seg.t1, lastArrival: now, timer: null, utteranceId: null, finalizedWith: null, queue: Promise.resolve(), jobs: 0, location };
+      g = { id: newId("grp"), segments: [], t0: seg.t0, t1: seg.t1, lastArrival: now, timer: null, utteranceId: null, finalizedWith: null, queue: Promise.resolve(), jobs: 0, location, previewId: null, preview: null };
       this.open.push(g);
     }
     g.segments.push(seg);
@@ -247,6 +259,12 @@ export class AudioPipeline {
     g.t1 = Math.max(g.t1, seg.t1);
     g.lastArrival = now;
     this.schedule(g);
+    if (g.segments.length === 1) {
+      const p: Promise<void> = this.preview(g, seg)
+        .catch((e) => console.error("audio:", e))
+        .finally(() => this.previewing.delete(p));
+      this.previewing.add(p);
+    }
     return seg;
   }
 
@@ -266,8 +284,11 @@ export class AudioPipeline {
       g.timer = null;
     }
     for (const g of groups) if (this.open.includes(g)) this.finalize(g);
-    while (this.work.size) await Promise.all([...this.work]);
+    while (this.work.size || this.previewing.size) await Promise.all([...this.work, ...this.previewing]);
   }
+
+  /** First-copy lines still being transcribed, so flush can wait for them. */
+  private previewing = new Set<Promise<void>>();
 
   /** Every job on any group, so flush can wait for all of them. */
   private work = new Set<Promise<void>>();
@@ -298,7 +319,18 @@ export class AudioPipeline {
     // Each part's transcription is queued before the part is visible to late copies, so a late copy always
     // waits for it. Parts are heard in order: each one's first job waits for the previous part's.
     let previous: Promise<void> = Promise.resolve();
-    for (const part of this.splitCrosstalk(g)) {
+    const parts = this.splitCrosstalk(g);
+    // The early line belongs to the part that holds the copy it was made from.
+    if (g.previewId && g.preview) {
+      const owner = parts.find((x) => x.segments.includes(g.preview!)) ?? parts[0];
+      if (owner !== g) {
+        owner.previewId = g.previewId;
+        owner.preview = g.preview;
+        g.previewId = null;
+        g.preview = null;
+      }
+    }
+    for (const part of parts) {
       previous = this.run(part, () => this.emit(part), previous);
       this.keep(part);
     }
@@ -326,7 +358,7 @@ export class AudioPipeline {
   }
 
   private regroup(g: Group, segments: Segment[]): Group {
-    return { ...g, id: newId("grp"), queue: Promise.resolve(), jobs: 0, mergedInto: undefined, timer: null, utteranceId: null, finalizedWith: null, segments, t0: Math.min(...segments.map((s) => s.t0)), t1: Math.max(...segments.map((s) => s.t1)) };
+    return { ...g, id: newId("grp"), queue: Promise.resolve(), jobs: 0, mergedInto: undefined, timer: null, utteranceId: null, finalizedWith: null, previewId: null, preview: null, segments, t0: Math.min(...segments.map((s) => s.t0)), t1: Math.max(...segments.map((s) => s.t1)) };
   }
 
   /**
@@ -344,6 +376,15 @@ export class AudioPipeline {
   }
 
   private async emit(g: Group) {
+    try {
+      await this.emitLine(g);
+    } catch (e) {
+      this.retract(g);
+      throw e;
+    }
+  }
+
+  private async emitLine(g: Group) {
     const best = pickBest(g.segments);
     const dur = (best.t1 - best.t0) / 1000;
     // Nothing to transcribe in near-silence, steady noise (no pauses against a floor) or
@@ -354,6 +395,7 @@ export class AudioPipeline {
     // out of a group already passed couldDiffer, whose loudest-for-a-moment rule covers replies too short for it.
     if (!g.split && !speechLike(best)) {
       g.finalizedWith = best.id;
+      this.retract(g);
       return;
     }
     const { text, engine } = await this.words(best, dur);
@@ -404,16 +446,21 @@ export class AudioPipeline {
     this.keep(part);
   }
 
+  /** The settled line: replaces the group's early line in place (same id) or, with none, makes the line. A line that doesn't stand takes its early line back. */
   private show(g: Group, best: Segment, text: string, engine: string) {
+    if (!this.showLine(g, best, text, engine)) this.retract(g);
+  }
+
+  private showLine(g: Group, best: Segment, text: string, engine: string): boolean {
     const guess = this.identify(g.segments, best, !g.split);
-    if (!text) return;
+    if (!text) return false;
     // Someone reading the join sentence: every laptop hears it, and none of it belongs in the transcript.
-    if (this.isCalibration(text, g)) return;
+    if (this.isCalibration(text, g)) return false;
     // From here to the line being stored nothing awaits: two groups finishing together can't both miss each other.
-    if (this.mergeTwin(g, text, best)) return;
+    if (this.mergeTwin(g, text, best)) return false;
     const person = this.session.person(guess.personId);
     const u: Utterance = {
-      id: newId("utt"),
+      id: g.previewId ?? newId("utt"),
       t0: g.t0,
       t1: g.t1,
       text,
@@ -430,8 +477,9 @@ export class AudioPipeline {
     // Hybrid sessions: the room's speakers play remote voices (and remote laptops hear the
     // room through the call). The same words heard in the other location are an echo.
     const echo = this.echoOf(u, best.snr);
-    if (echo === "drop") return;
+    if (echo === "drop") return false;
     g.utteranceId = u.id;
+    // The early line stays until the settled one is out: anything that fails on the way takes it back (emit's catch).
     this.stats.lines++;
     if (guess.method.startsWith("voice")) this.stats.voice++;
     if (!guess.personId) this.stats.someone++;
@@ -439,6 +487,88 @@ export class AudioPipeline {
     this.session.store.put("utterances", u);
     this.onLine?.(u, true);
     bus.send({ type: "utterance", utterance: u });
+    this.onShown?.(u);
+    g.previewId = null;
+    g.preview = null;
+    this.session.previews.delete(u.id);
+    return true;
+  }
+
+  /**
+   * The first copy of a stretch of speech, shown as soon as it is transcribed instead of when the room's other copies
+   * have had their time. For display only: it lives in session.previews (never the store), so nothing that acts on
+   * what was said (the brain, directives, agents, the wiki) can see it. The settled line takes over its id.
+   * Nothing is shown that the settled line would drop for being a calibration read, an echo or a twin.
+   */
+  private async preview(g: Group, seg: Segment) {
+    if (!speechLike(seg)) return;
+    const heard = await this.words(seg);
+    // The window closed while it was transcribed: the settled line comes next, straight away.
+    if (!this.open.includes(g) || g.previewId || this.closed) return;
+    const u = this.earlyLine(g, seg, heard);
+    if (!u) return;
+    g.previewId = u.id;
+    g.preview = seg;
+    this.session.previews.set(u.id, u);
+    bus.send({ type: "utterance", utterance: u });
+    this.onShown?.(u);
+  }
+
+  /**
+   * THE ONE RULE FOR EARLY LINES, and the only way one is made: it shows the words, speaker and laptop of the one copy that
+   * was transcribed, and nothing changes it until the settled line replaces it (or takes it back). No later copy relabels it.
+   * Returns nothing when the settled line would drop it or hold it back: no words, the join read, any recording
+   * being open anywhere in the room, an echo, a twin.
+   */
+  private earlyLine(g: Group, seg: Segment, heard: { text: string; engine: string }): Utterance | undefined {
+    const { text, engine } = heard;
+    if (!text || this.recordingActive() || this.isCalibration(text, g)) return undefined;
+    const guess = this.identify([seg], seg, !g.split);
+    const u: Utterance = {
+      id: newId("utt"),
+      t0: seg.t0,
+      t1: seg.t1,
+      text,
+      personId: guess.personId,
+      speakerName: this.session.person(guess.personId)?.name ?? "Someone",
+      confidence: guess.confidence,
+      method: guess.method,
+      deviceId: seg.deviceId,
+      devices: [{ deviceId: seg.deviceId, level: round(seg.levelDb), snr: round(seg.snr) }],
+      location: g.location,
+      eventId: null,
+      engine,
+      settled: false,
+    };
+    if (this.findTwin(g, text, seg, true) || this.echoOf(u, seg.snr, true) === "drop") return undefined;
+    return u;
+  }
+
+  /**
+   * Every early line goes, from every window: early lines became disallowed (a recording opened) or the room is ending.
+   * The one function for it; a single group's retract is the same step for one line.
+   */
+  retractAll() {
+    for (const g of [...this.open, ...this.finalized]) {
+      g.previewId = null;
+      g.preview = null;
+    }
+    for (const id of [...this.session.previews.keys()]) {
+      this.session.previews.delete(id);
+      bus.send({ type: "utterance-retracted", id });
+    }
+  }
+
+  /** The group's early line didn't become a line (a twin, an echo, the join read, nothing heard): it goes away. */
+  private retract(g: Group) {
+    const id = g.previewId;
+    if (!id) return;
+    g.previewId = null;
+    g.preview = null;
+    const u = this.session.previews.get(id);
+    this.session.previews.delete(id);
+    // Display only: windows remove the line by id; agents never hear of it.
+    if (u) bus.send({ type: "utterance-retracted", id });
   }
 
   /** Adds copies' devices to a line, keeping the ones it already lists. */
@@ -514,19 +644,29 @@ export class AudioPipeline {
    * - and when both copies have a voice, the voices agree.
    */
   private mergeTwin(g: Group, text: string, best: Segment): boolean {
+    const twin = this.findTwin(g, text, best, false);
+    if (!twin) return false;
+    return this.joinTwin(g, twin);
+  }
+
+  /** `early`: for deciding whether to show an early line, lines still showing early count too. */
+  private findTwin(g: Group, text: string, best: Segment, early: boolean): Utterance | undefined {
     const mine = new Set(g.segments.map((s) => s.deviceId));
     const words = plainText(text);
-    if (!words) return false;
+    if (!words) return undefined;
+    const lines = early ? [...this.session.store.all("utterances"), ...this.session.previews.values()] : this.session.store.all("utterances");
     // The nearest in time of every line that qualifies, voices included: a nearer one in another voice doesn't hide it.
-    const twin = this.session.store
-      .all("utterances")
-      .filter((x) => x.location === g.location && x.id !== g.utteranceId && Math.abs(x.t0 - g.t0) < TWIN_MS && Math.abs(x.t1 - g.t1) < TWIN_MS + 1500 && !x.devices.some((d) => mine.has(d.deviceId)) && plainText(x.text) === words)
+    const twin = lines
+      .filter((x) => x.location === g.location && x.id !== g.utteranceId && x.id !== g.previewId && Math.abs(x.t0 - g.t0) < TWIN_MS && Math.abs(x.t1 - g.t1) < TWIN_MS + 1500 && !x.devices.some((d) => mine.has(d.deviceId)) && plainText(x.text) === words)
       .filter((x) => {
         const theirs = this.voiceOf(x).embedding;
         return !best.embedding || !theirs || cosine(best.embedding, theirs) >= SAME_VOICE;
       })
       .sort((a, b) => Math.abs(a.t0 - g.t0) - Math.abs(b.t0 - g.t0))[0];
-    if (!twin) return false;
+    return twin;
+  }
+
+  private joinTwin(g: Group, twin: Utterance): boolean {
     const home = this.finalized.find((x) => x.utteranceId === twin.id);
     // Its group is gone (a copy flushed late): the same words from another laptop then, so it isn't shown twice. It
     // still joins that line: its devices are added (the line's other copies are gone, so its speaker stands).
@@ -551,17 +691,17 @@ export class AudioPipeline {
    * "drop" when this line is an echo of a clearer copy heard in the other location: the very same words, one by one.
    * A line with a word added or changed ("Yes" and "Yes please") is someone answering, and stays.
    */
-  private echoOf(u: Utterance, snr: number): "drop" | "keep" {
+  private echoOf(u: Utterance, snr: number, early = false): "drop" | "keep" {
     const words = plainText(u.text);
-    const recent = this.session.store
-      .all("utterances")
-      .filter((x) => x.location && x.location !== u.location && Math.abs(x.t0 - u.t0) < 3000 && Math.abs(x.t1 - u.t1) < 3500);
+    const lines = early ? [...this.session.store.all("utterances"), ...this.session.previews.values()] : this.session.store.all("utterances");
+    const recent = lines
+      .filter((x) => x.id !== u.id && x.location && x.location !== u.location && Math.abs(x.t0 - u.t0) < 3000 && Math.abs(x.t1 - u.t1) < 3500);
     for (const other of recent) {
       if (plainText(other.text) !== words) continue;
       const otherSnr = Math.max(...other.devices.map((d) => d.snr));
       if (otherSnr >= snr - 6) return "drop";
       // This copy is much clearer: the earlier one was the echo.
-      if (other.eventId) this.session.store.updateEvent(other.eventId, { relevance: "chatter", data: { echo: true } });
+      if (!early && other.eventId) this.session.store.updateEvent(other.eventId, { relevance: "chatter", data: { echo: true } });
     }
     return "keep";
   }

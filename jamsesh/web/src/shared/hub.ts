@@ -3,7 +3,7 @@
 import { useSyncExternalStore } from "react";
 import { currentHostKey, isHostConfirmed, readDeviceId, readPref, writePref } from "./identity";
 import { currentRoom, hostVerified, markContact, recheckHost, setRoomSource, onContact, outbox, uuid } from "./offline";
-import type { BusMessage, HubState, JamEvent, Stage, Utterance } from "../../../hub/src/types";
+import type { BusMessage, HubState, JamEvent, Stage, Talker, Utterance } from "../../../hub/src/types";
 
 export type { HubState, JamEvent, Stage, Utterance };
 export type * from "../../../hub/src/types";
@@ -37,6 +37,8 @@ interface Snapshot {
   removedChatsRev: number;
   thinking: string | null;
   levels: Record<string, number>;
+  /** Who is talking right now (display only), from the hub. */
+  talkers: Talker[];
   speaking: string | null;
   clockOffset: number;
   /** The host's reset epoch, from its clock pongs (-1 before the first): stamped on audio as it is captured. */
@@ -55,7 +57,7 @@ export function reconnectDelay(retry: number, rand: () => number = Math.random) 
 }
 
 class HubClient {
-  snap: Snapshot = { state: null, connected: false, status: "connecting", lastContact: 0, clockSynced: false, epoch: 0, toasts: [], removed: [], removedChatsRev: 0, thinking: null, levels: {}, speaking: null, clockOffset: 0, voiceEpoch: -1 };
+  snap: Snapshot = { state: null, connected: false, status: "connecting", lastContact: 0, clockSynced: false, epoch: 0, toasts: [], removed: [], removedChatsRev: 0, thinking: null, levels: {}, talkers: [], speaking: null, clockOffset: 0, voiceEpoch: -1 };
   private listeners = new Set<() => void>();
   private eventListeners = new Set<(e: JamEvent) => void>();
   private gapListeners = new Set<() => void>();
@@ -203,6 +205,9 @@ class HubClient {
       ws.close();
     } catch {}
     this.ws = null;
+    // Who was talking, and early lines still settling, are only known while connected: the next state is the truth.
+    const s = this.snap.state;
+    this.set({ talkers: [], ...(s?.utterances.some((u) => u.settled === false) ? { state: { ...s, utterances: s.utterances.filter((u) => u.settled !== false) } } : {}) });
     this.clear("connect");
     this.clear("heartbeat");
     this.clear("resync");
@@ -323,7 +328,7 @@ class HubClient {
       if (known > 0 && oldest > known + 1) for (const fn of this.gapListeners) fn();
       for (const e of [...state.events].sort((a, b) => a.id - b.id)) if (e.id > known) for (const fn of this.eventListeners) fn(e);
     }
-    this.set(sameRoom ? { state } : { state, removed: [], thinking: null, speaking: null, levels: {}, toasts: [], clockSynced: false, clockOffset: 0 });
+    this.set(sameRoom ? { state } : { state, removed: [], thinking: null, speaking: null, levels: {}, talkers: [], toasts: [], clockSynced: false, clockOffset: 0 });
   }
 
   /** Host time now, for stamping audio. */
@@ -382,6 +387,10 @@ class HubClient {
       }
       case "thinking":
         return this.set({ thinking: m.on ? m.label ?? "Thinking" : null });
+      case "utterance-retracted":
+        return s ? this.set({ state: { ...s, utterances: s.utterances.filter((u) => u.id !== m.id) } }) : undefined;
+      case "talking":
+        return this.set({ talkers: m.talkers });
       case "level":
         return this.set({ levels: { ...this.snap.levels, [m.deviceId]: m.level } });
       case "share-ended": {

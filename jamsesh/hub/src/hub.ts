@@ -4,6 +4,7 @@ import { HelperRegistry } from "./children";
 import { mkdirSync, realpathSync, rmSync } from "node:fs";
 import { join, normalize, sep } from "node:path";
 import { AudioPipeline } from "./audio/pipeline";
+import { Speaking } from "./speaking";
 import { Transcriber } from "./audio/transcribe";
 import { learningNote, voiceprintStatus, type Learning } from "./audio/voiceprint";
 import { decodeWav, resample } from "./audio/wav";
@@ -113,6 +114,8 @@ export class Hub {
   brain: Brain;
   transcriber: Transcriber;
   audio: AudioPipeline;
+  /** Who is talking right now, for the windows' indicator. Display only: not stored, not sent to agents. */
+  speaking: Speaking;
   canvas: Canvas;
   devproxy: DevProxy;
   mcp: McpEndpoint;
@@ -196,8 +199,10 @@ export class Hub {
     };
     this.brain = new Brain(this.session, this.host);
     this.transcriber = new Transcriber(this.session, this.helpers);
-    this.audio = new AudioPipeline(this.session, this.transcriber);
+    this.audio = new AudioPipeline(this.session, this.transcriber, () => this.promptMode.size > 0 || this.stoppingRecs.size > 0 || this.recs.size > 0);
     this.audio.track = (work) => this.track("speech being transcribed", work);
+    this.speaking = new Speaking(this.session);
+    this.audio.onShown = (u) => this.speaking.lineShown(u);
     this.canvas = new Canvas(this.session, this.helpers, dir);
     this.fonts = new FontService(() => this.session.agents(), (id) => this.session.person(id)?.name);
     this.session.fonts = () => this.fonts.state();
@@ -319,7 +324,7 @@ export class Hub {
   async start() {
     const tasks: Promise<unknown>[] = [this.net.start().catch((e) => console.error("net:", e))];
     if (this.opts.whisper !== false) tasks.push(this.transcriber.startLocal());
-    // The opt-in faster engine. Not awaited: its first start downloads the model, and whisper or the gateway carry the room meanwhile.
+    // The faster engine (on by default). Not awaited: its first start downloads the model, and whisper or the gateway carry the room meanwhile.
     if (this.opts.whisper !== false) void this.transcriber.syncFastEngine().then((ok) => console.log(ok ? "parakeet: ready" : `parakeet: ${this.transcriber.parakeet.status().detail}`));
     if (this.opts.canvas !== false) tasks.push(this.canvas.start().then(() => this.mcp.loadCanvasTools()));
     this.devproxy.restore();
@@ -388,9 +393,11 @@ export class Hub {
     const unfinished = await this.drain(Hub.SHUTDOWN_MS.work);
     if (unfinished.length) console.error(`Shutdown: still working on ${unfinished.join(", ")}; the final save may miss it.`);
     this.audio.closed = true; // an upload still sending now is refused, not taken in behind the flush
+    this.audio.retractAll(); // the room is ending: no window keeps an early line
     const docs = !unfinished.length && !this.workLost;
     this.canvas.flushActivity(); // canvas work still batched for a timer is recorded while the conversation is open
     this.brain.stop();
+    this.speaking.stop();
     this.transcriber.stop();
     // A snapshot whose canvas copy failed is not a final save.
     const saved = await step(this.autosave.save("end of session", { final: true }).then((snap) => (snap?.canvasFailed ? Promise.reject(new Error("the canvas copy failed")) : snap)), Hub.SHUTDOWN_MS.snapshot);
@@ -549,6 +556,7 @@ export class Hub {
     // The window ends on its own (SPEC 11.3) if Stop never arrives; nothing said in it is lost.
     w.timer = this.session.timers.after(() => this.releasePrompt(deviceId, w), max + 1000) ?? undefined;
     this.promptMode.set(deviceId, w);
+    this.audio.retractAll(); // a recording is open: nothing is shown early, and what is showing goes
     return w;
   }
 
