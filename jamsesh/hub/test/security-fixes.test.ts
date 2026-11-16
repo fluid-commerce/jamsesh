@@ -249,7 +249,7 @@ test("the canvas link for a caller that isn't this computer is relative, so it r
   const edit = await (await fetch(`${base}/api/canvas-link?kind=edit`, { headers: lan })).json();
   expect(edit.link).toBe("/collab/?file=f1&token=EDIT");
   expect((await (await fetch(`${base}/api/canvas-link?kind=view`, { headers: lan })).json()).link).toBe("/collab/?file=f1&token=VIEW");
-  expect(decodeURIComponent(edit.desktop)).toBe("figcraft://join?server=/collab/&file=f1&token=EDIT");
+  expect(decodeURIComponent(edit.desktop)).toMatch(/^figcraft:\/\/join\?server=ws:\/\/[^/]+\/collab\/&file=f1&token=EDIT$/);
   // The host's own window keeps an absolute address.
   const own = await (await fetch(`${base}/api/canvas-link?kind=edit`, { headers: hostWindow() })).json();
   expect(own.desktop).toContain("figcraft://join?server=ws");

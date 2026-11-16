@@ -1407,7 +1407,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     const ws = kind === "view" ? s.canvas.wsView : s.canvas.wsEdit;
     const q = ws?.match(/\?(file=[^&]+&token=[^&]+)/)?.[1];
     const local = isLocal(ip);
-    const server = local ? `${originOf(req, url).replace(/^http/, "ws")}/collab/` : "/collab/";
+    // The desktop app is opened by the OS, which can't resolve a relative address: it keeps the full one, as before.
+    const server = `${originOf(req, url).replace(/^http/, "ws")}/collab/`;
     const link = local ? hub.canvas.localWs(kind) : q ? `/collab/?${q}` : null;
     const desktop = q ? `figcraft://join?server=${encodeURIComponent(server)}&${q}` : null;
     return json({ link, status: s.canvas.status, reason: s.canvas.reason, desktop });
