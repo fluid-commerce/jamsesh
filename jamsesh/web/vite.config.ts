@@ -9,6 +9,7 @@ export default defineConfig({
     proxy: {
       "/api": "http://127.0.0.1:4747",
       "/renders": "http://127.0.0.1:4747",
+      "/photos": "http://127.0.0.1:4747",
       "/canvas": "http://127.0.0.1:4747",
       "/ws": { target: "ws://127.0.0.1:4747", ws: true },
     },

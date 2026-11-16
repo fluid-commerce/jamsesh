@@ -88,7 +88,7 @@ export async function startDriving(screen = "main"): Promise<DriveHandle> {
   return {
     screen,
     alive,
-    send: (ev) => alive() && (hub.send({ type: "drive", screen, ev }), true),
+    send: (ev) => alive() && (hub.send({ type: "drive", screen, ev }), emitOwnCursor(screen, ev), true),
     stop: () => stopDriving(screen),
   };
 }
@@ -107,6 +107,11 @@ export const driveTogether = async (to: string, screen = "main") => void (await 
 export function onCursor(fn: (c: DriveCursor) => void): () => void {
   return hub.onMessage((m) => m?.type === "drive" && m.ev && fn(m as DriveCursor));
 }
+
+const ownSubs = new Set<(screen: string, ev: DriveEvent) => void>();
+/** What this window itself sends while driving, as it is sent: the layer in this window draws its own cursor from it, with no wait for the hub's echo. */
+export const onOwnCursor = (fn: (screen: string, ev: DriveEvent) => void): (() => void) => (ownSubs.add(fn), () => void ownSubs.delete(fn));
+const emitOwnCursor = (screen: string, ev: DriveEvent) => ownSubs.forEach((f) => f(screen, ev));
 
 /** The hub turned down this window's input (not driving), with why. */
 export function onDriveDenied(fn: (m: { screen: string; why: string }) => void): () => void {

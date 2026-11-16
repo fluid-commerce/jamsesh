@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { glide, letGo, textOn } from "../src/host/DriveLayer";
+import { follow, glide, letGo, textOn } from "../src/host/DriveLayer";
 import { keyAction, travel } from "../src/shared/DriveSurface";
 import { driveScale, driverState, targetAt, registerDriveTarget, anyoneDriving } from "../src/shared/driving";
 
@@ -13,6 +13,12 @@ test("the glide covers 1 - exp(-20 dt) of the way and jumps with Reduce Motion",
   expect(glide(0, 100, 0.05, false)).toBeCloseTo(100 * (1 - Math.exp(-1)), 5);
   expect(glide(0, 100, 5, false)).toBeCloseTo(100 * (1 - Math.exp(-2)), 5); // dt is capped at 0.1 s
   expect(glide(0, 100, 0.01, true)).toBe(100);
+});
+
+test("the viewer's own cursor follows their pointer exactly; everyone else's still glides", () => {
+  expect(follow(0, 100, 0.016, false, true)).toBe(100);
+  expect(follow(0, 100, 0.016, false, false)).toBe(glide(0, 100, 0.016, false));
+  expect(follow(0, 100, 0.016, false, false)).toBeLessThan(100);
 });
 
 test("trackpad motion moves the dart a stage-width fraction and stops at the edges", () => {

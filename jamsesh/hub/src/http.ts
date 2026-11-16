@@ -468,6 +468,9 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         // A frame drawn at the size the screen asked for (the stored render is capped at 1600 px): /renders/full/<artifact id>.png?size=2400
         const full = path.match(/^\/renders\/full\/([\w-]+)\.png$/);
         if (full) return readOnly(req) ?? (await fullRender(hub, full[1], Number(url.searchParams.get("size"))));
+        // Profile photos live in the team folder (people outlive sessions), read like the renders.
+        const photo = path.match(/^\/photos\/([\w.-]+)$/);
+        if (photo) return readOnly(req) ?? file(join(hub.photosDir, photo[1]), hub.photosDir);
         if (path.startsWith("/renders/")) return readOnly(req) ?? file(join(hub.canvas.rendersDir, path.slice("/renders/".length)), hub.canvas.rendersDir);
         if (path === "/canvas" || path.startsWith("/canvas/")) {
           const no = readOnly(req);
@@ -1428,14 +1431,16 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     const refused = notAPerson();
     if (refused) return refused;
     const kind = url.searchParams.get("kind") === "view" ? "view" : "edit";
-    // Through the hub's relay at the address this person used (LAN, remote, HTTPS), so the
-    // canvas server itself never has to be reachable from outside this machine.
+    // For anyone but the host's own window the links are relative: the page resolves them against the address it was loaded from.
+    // A person on a Mac that joined through the app reaches this hub through the app's local relay, which adds their credential;
+    // only that address works for them, and the hub (which trusts X-Forwarded-Host from loopback alone) can't know it.
     const ws = kind === "view" ? s.canvas.wsView : s.canvas.wsEdit;
     const q = ws?.match(/\?(file=[^&]+&token=[^&]+)/)?.[1];
-    const origin = originOf(req, url);
-    const relay = q ? `${origin.replace(/^http/, "ws")}/collab/?${q}` : null;
-    const link = isLocal(ip) ? hub.canvas.localWs(kind) : relay;
-    const desktop = q ? `figcraft://join?server=${encodeURIComponent(`${origin.replace(/^http/, "ws")}/collab/`)}&${q}` : null;
+    const local = isLocal(ip);
+    // The desktop app is opened by the OS, which can't resolve a relative address: it keeps the full one, as before.
+    const server = `${originOf(req, url).replace(/^http/, "ws")}/collab/`;
+    const link = local ? hub.canvas.localWs(kind) : q ? `/collab/?${q}` : null;
+    const desktop = q ? `figcraft://join?server=${encodeURIComponent(server)}&${q}` : null;
     return json({ link, status: s.canvas.status, reason: s.canvas.reason, desktop });
   }
 

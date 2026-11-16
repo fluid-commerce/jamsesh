@@ -2,7 +2,8 @@
 // the input they send replayed into the tile under each one. The dart and its name tag are FigCraft's own collaborator
 // pointer (crates/ui-egui/src/live.rs: `pointer`, `name_tag`, `text_on`) drawn again here as SVG, and it glides the same way.
 import { useEffect, useRef, useState } from "react";
-import { driveScale, emitGlide, onCursor, targetAt, useDriverState, type DriveCursor, type DriveTarget, type Glide } from "../shared/driving";
+import { useHub } from "../shared/hub";
+import { driveScale, emitGlide, onCursor, onOwnCursor, targetAt, useDriverState, type DriveCursor, type DriveTarget, type Glide } from "../shared/driving";
 
 /** live.rs GLIDE: the shown position covers 1 - exp(-dt * GLIDE) of the way to the reported one each frame. */
 const GLIDE = 20;
@@ -28,7 +29,14 @@ export function glide(from: number, to: number, dt: number, reduce: boolean): nu
   return reduce ? to : from + (to - from) * (1 - Math.exp(-Math.min(Math.max(dt, 0), 0.1) * GLIDE));
 }
 
+/** One step of a shown cursor: the viewer's own follows their pointer exactly, everyone else's glides. */
+export function follow(from: number, to: number, dt: number, reduce: boolean, own: boolean): number {
+  return own ? to : glide(from, to, dt, reduce);
+}
+
 interface Shown {
+  /** The viewer's own cursor in their own window: drawn at once from their pointer. */
+  own?: boolean;
   name: string;
   color: string;
   /** Where it was last told to be (fractions). */
@@ -54,14 +62,24 @@ export function letGo(st: Replay | undefined, personId: string) {
   if (st) st.down = st.hover = null;
 }
 
-export function DriveLayer({ screen, replay }: { screen: string; replay?: boolean }) {
+/**
+ * `ownWindow`: a person's own window, where their cursor is drawn straight from their local pointer (no easing, no wait for the hub's
+ * echo, which is ignored); everyone else's cursors, and the big screen, keep the glide.
+ */
+export function DriveLayer({ screen, replay, ownWindow }: { screen: string; replay?: boolean; ownWindow?: boolean }) {
   const layer = useRef<HTMLDivElement>(null);
   const els = useRef(new Map<string, HTMLDivElement>());
   const shown = useRef(new Map<string, Shown>());
   const replays = useRef(new Map<string, Replay>());
   const raf = useRef(0);
   const [people, setPeople] = useState<{ id: string; name: string; color: string }[]>([]);
-  const driving = useDriverState(screen).drivers;
+  const { drivers: driving, me } = useDriverState(screen);
+  const { state } = useHub();
+  // Read inside the cursor handlers, which outlive a render.
+  const self = useRef<{ id: string | null; name: string; color: string }>({ id: null, name: "", color: "" });
+  const mine = ownWindow ? me.id : null;
+  const meP = state?.people.find((p) => p.id === mine);
+  self.current = { id: mine, name: meP?.name ?? "", color: meP?.color ?? "#888" };
   const drivingIds = driving.map((d) => d.id).join(",");
 
   // Over the canvas a driver has one cursor: FigCraft's collaborator cursors on the big screen's canvas are hidden while anyone drives
@@ -115,8 +133,8 @@ export function DriveLayer({ screen, replay }: { screen: string; replay?: boolea
         const [tx, ty] = [c.x * w, c.y * h];
         if (c.fresh) ((c.sx = tx), (c.sy = ty), (c.fresh = false));
         else {
-          c.sx = glide(c.sx, tx, dt, reduce());
-          c.sy = glide(c.sy, ty, dt, reduce());
+          c.sx = follow(c.sx, tx, dt, reduce(), !!c.own);
+          c.sy = follow(c.sy, ty, dt, reduce(), !!c.own);
         }
         if (Math.hypot(tx - c.sx, ty - c.sy) < SNAP) (c.sx = tx), (c.sy = ty);
         else moving = true;
@@ -163,9 +181,8 @@ export function DriveLayer({ screen, replay }: { screen: string; replay?: boolea
       else if (ev.k === "wheel") t.handle({ k: "wheel", lx, ly, dx: ev.dx, dy: ev.dy, ctrl: ev.ctrl }, c.personId);
     };
 
-    const off = onCursor((c) => {
+    const show = (c: DriveCursor, own: boolean) => {
       if (c.screen !== screen) return;
-      if (replay) replayEv(c);
       const { ev } = c;
       if (ev.k === "key") return;
       let s = shown.current.get(c.personId);
@@ -174,6 +191,7 @@ export function DriveLayer({ screen, replay }: { screen: string; replay?: boolea
         shown.current.set(c.personId, s);
         setPeople((p) => (p.some((x) => x.id === c.personId) ? p : [...p, { id: c.personId, name: c.name, color: c.color }]));
       }
+      s.own = own;
       s.seen = Date.now();
       if (ev.k === "leave") ((s.hidden = true), (s.down = false));
       else {
@@ -184,9 +202,20 @@ export function DriveLayer({ screen, replay }: { screen: string; replay?: boolea
         else if (ev.k === "up") s.down = false;
       }
       wake();
+    };
+    const off = onCursor((c) => {
+      if (c.screen !== screen) return;
+      if (replay) replayEv(c);
+      // The viewer's own cursor is drawn from their own pointer (below): the hub's echo of it would only lag behind.
+      if (c.personId !== self.current.id) show(c, false);
+    });
+    const offOwn = onOwnCursor((sc, ev) => {
+      const me = self.current;
+      if (me.id) show({ screen: sc, personId: me.id, name: me.name, color: me.color, ev, t: Date.now() }, true);
     });
     return () => {
       off();
+      offOwn();
       for (const [id, st] of replays.current) letGo(st, id);
       cancelAnimationFrame(raf.current);
       raf.current = 0;
