@@ -167,7 +167,10 @@ fn main_toolbar(app: &mut FigApp, ui: &mut Ui, canvas: Rect, t: &Tokens, board: 
         mode_switcher(app, ui, x, cy, t);
     }
     ui.set_clip_rect(outer_clip);
-    help_button(app, ui, canvas, rect, t);
+    // A room canvas leaves the help menu (About, updates) to the page; its corner is the zoom chip's.
+    if !app.ui.canvas_only {
+        help_button(app, ui, canvas, rect, t);
+    }
 }
 
 /// How far the buttons of a pill `width` wide drawn at `rect` are scrolled: wider than the pill (a
