@@ -3,6 +3,7 @@
 // Host mode runs the hub as a child process and shows the big screen and your own window.
 // Join mode shows the host's client view through a local relay (see proxy.rs), so the microphone
 // works without HTTPS, and keeps this Mac's token in the Keychain.
+mod credentials;
 mod discover;
 mod fonts;
 mod host;
@@ -24,7 +25,6 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tokio::sync::Mutex;
 
 const RELAY_PORT: u16 = 4790;
-const KEYCHAIN_SERVICE: &str = "JamSesh";
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -86,6 +86,8 @@ struct App {
     beats: Arc<std::sync::Mutex<watchdog::Beats>>,
     /// Every change of session (hosting, a project switch, joining, leaving, resuming, Quit, Reopen) takes a turn here.
     switching: Turns,
+    /// Saved sign-ins: one Keychain item, read at most once per run (see credentials.rs).
+    creds: Arc<credentials::Credentials>,
 }
 
 /// The one queue for changing session: one transition at a time, from stopping the old hub to cleaning up after a
@@ -214,10 +216,6 @@ fn write_config(dir: &std::path::Path, cfg: &Config) -> Result<(), String> {
 
 fn warn(app: &AppHandle, title: &str, message: String) {
     app.dialog().message(message).title(title).kind(MessageDialogKind::Warning).show(|_| {});
-}
-
-fn keychain(origin: &str) -> Option<keyring::Entry> {
-    keyring::Entry::new(KEYCHAIN_SERVICE, origin).ok()
 }
 
 // ---- windows ----
@@ -371,11 +369,16 @@ async fn start_joining(app: &AppHandle, state: &App, input: &str, name: Option<S
     }
     let origin = up.origin.clone();
     let origin_for_agents = origin.clone();
-    let token = keychain(&origin).and_then(|k| k.get_password().ok());
-    let agents = keychain(&format!("{origin}#agents")).and_then(|k| k.get_password().ok());
+    // The Keychain read may sit behind a prompt, so it stays off the async runtime's threads.
+    let saved = {
+        let (creds, origin) = (state.creds.clone(), origin.clone());
+        tokio::task::spawn_blocking(move || creds.lookup(&origin)).await.unwrap_or_default()
+    };
+    let (token, agents) = (saved.token, saved.agents);
     let paired = token.is_some();
     let keep = origin.clone();
     let handle = app.clone();
+    let creds = state.creds.clone();
     let mut inner = state.inner.lock().await;
     if let Some(old) = inner.relay.take() {
         old.stop();
@@ -384,9 +387,7 @@ async fn start_joining(app: &AppHandle, state: &App, input: &str, name: Option<S
         m.stop();
     }
     let relay = proxy::start(up, token.clone(), agents.clone(), RELAY_PORT, move |tok| {
-        if let Some(k) = keychain(&keep) {
-            let _ = k.set_password(&tok);
-        }
+        creds.remember(&keep, Some(&tok), None);
         // Just paired: get this Mac's agents their own credential, then offer to connect them.
         let (handle, origin, tok) = (handle.clone(), keep.clone(), tok.clone());
         tauri::async_runtime::spawn(async move {
@@ -429,10 +430,8 @@ async fn start_joining(app: &AppHandle, state: &App, input: &str, name: Option<S
 async fn fetch_agents_token(app: &AppHandle, origin: &str, person_token: &str) {
     let Ok(body) = proxy::post(origin, "/api/pair/agents", Some(person_token)).await else { return };
     let Some(token) = serde_json::from_str::<serde_json::Value>(&body).ok().and_then(|v| v["token"].as_str().map(str::to_string)) else { return };
-    if let Some(k) = keychain(&format!("{origin}#agents")) {
-        let _ = k.set_password(&token);
-    }
     let state = app.state::<Arc<App>>();
+    state.creds.remember(origin, None, Some(&token));
     let mut inner = state.inner.lock().await;
     if let Some(r) = inner.relay.as_ref() {
         r.set_agents_token(Some(token));
@@ -1510,6 +1509,7 @@ fn main() {
                 screens: Default::default(),
                 beats: Default::default(),
                 switching: Turns::new(),
+                creds: Arc::new(credentials::Credentials::new(Box::new(credentials::Keychain))),
             });
             app.manage(state.clone());
             DEVTOOLS.store(cfg.devtools || std::env::var_os("JAMSESH_DEVTOOLS").is_some_and(|v| v == "1"), std::sync::atomic::Ordering::Relaxed);
