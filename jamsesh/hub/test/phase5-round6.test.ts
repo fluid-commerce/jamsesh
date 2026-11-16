@@ -96,7 +96,8 @@ voiced("a relabel said aloud to the brain relabels the line and changes no voice
   const [ana, , cam] = people("5");
   const { id, eventId } = taughtLine(ana.id, 5);
   const before = count(ana.id);
-  expect(hub.brain.relabel!(eventId, cam.name)).toContain(`now ${cam.name}'s`);
+  // The tool answers briefly: the notice is already on screen, and a longer answer would be repeated aloud.
+  expect(hub.brain.relabel!(eventId, cam.name)).toBe("Done.");
   expect(hub.session.store.get("utterances", id)).toMatchObject({ personId: cam.id });
   expect(count(cam.id)).toBe(0);
   expect(count(ana.id)).toBe(before);
