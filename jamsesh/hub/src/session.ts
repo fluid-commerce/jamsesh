@@ -606,6 +606,8 @@ export class Session {
     broadcasts?: boolean;
     /** Whether an older record's `machine` is the caller's machine under an earlier credential. */
     sameMachine?: (machine: string) => boolean;
+    /** Whether an older record's own connection is gone (closed, or silent since this chat's began). Without it, a minute's quiet counts. */
+    connectionGone?: (old: Agent) => boolean;
   }): { agent: Agent; resumed: boolean; quietMs: number | null } {
     const owner = this.personByName(info.ownerName) ?? (info.ownerName ? this.upsertPerson({ name: info.ownerName }) : undefined);
     const agents = this.store.all("agents");
@@ -634,14 +636,15 @@ export class Session {
         : undefined) ??
       // A transport id (`mcp:<session>`) is only the connection's, and it changes when the MCP server restarts. A
       // chat that joins under one resumes the quiet record of an earlier connection from the same person, machine,
-      // folder and harness (keeping its id and name, taking the new chat id). A record seen in the last minute is
-      // still live in another connection: two real chats share the folder, and the newcomer is its own agent. A
-      // chat that names its own id (`args.chat`) is never matched this way.
+      // folder and harness (keeping its id and name, taking the new chat id). A record whose connection made a
+      // request after the newcomer's began is live: two real chats share the folder, and the newcomer is its own
+      // agent. An older connection that speaks again after being taken over is sent back through jam_join (mcp.ts),
+      // which makes it a second agent: it never takes its place back. A chat that names its own id (`args.chat`) is never matched this way.
       (isTransportChat(info.chatId) && owner
         ? agents
             .filter((a) => isTransportChat(a.chatId) && a.chatId !== info.chatId && a.ownerId === owner.id && a.harness === info.harness && !!info.cwd && a.cwd === info.cwd)
             .filter((a) => a.machine === info.machine || !!info.sameMachine?.(a.machine))
-            .filter((a) => now - a.lastSeen > 60_000)
+            .filter((a) => (info.connectionGone ? info.connectionGone(a) : now - a.lastSeen > 60_000))
             .sort((a, b) => b.lastSeen - a.lastSeen)[0]
         : undefined);
     const harnessLabel = info.harness === "codex" ? "Codex" : info.harness === "claude-code" ? "Claude" : "Agent";

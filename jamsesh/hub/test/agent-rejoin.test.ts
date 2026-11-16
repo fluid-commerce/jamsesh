@@ -1,10 +1,12 @@
 // A chat whose local MCP server restarted joins again under a new transport id (`mcp:<session>`): it is the
 // same agent, not a second one with a suffix. A live chat in the same folder, and a chat with its own id, are
 // not taken over.
-import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Hub } from "../src/hub";
+import { startHttp } from "../src/http";
 import { Session } from "../src/session";
 import { Store } from "../src/store";
 
@@ -67,5 +69,71 @@ describe("rejoining after the MCP connection restarted", () => {
     s.removeAgent(a.id);
     expect(s.agent(a.id)).toBeUndefined();
     expect(s.rejoinBlocked("mcp:new", null, { machine: "host", cwd: "/work/jamsesh", harness: "claude-code" })).toBeDefined();
+  });
+});
+
+// ---- through the real MCP endpoint: today's timeline ----
+
+const dir = mkdtempSync(join(tmpdir(), "jam-rejoin-http-"));
+const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "d") });
+const server = startHttp(hub, 0);
+afterAll(() => {
+  server.stop(true);
+  hub.devproxy.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+const chey = hub.session.upsertPerson({ name: "Chey" });
+const cred = hub.auth.issue({ kind: "agent", label: "Chey's agents", ip: "10.0.0.8", personId: chey.id, ownerDeviceId: "dev_macA" });
+const post = (body: object, sid?: string) =>
+  fetch(`http://127.0.0.1:${server.port}/mcp`, {
+    method: "POST",
+    headers: { "x-forwarded-for": "9.9.9.9", "content-type": "application/json", authorization: `Bearer ${cred.token}`, accept: "application/json, text/event-stream", ...(sid ? { "mcp-session-id": sid } : {}) },
+    body: JSON.stringify(body),
+  });
+const connect = async () => {
+  const init = await post({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "claude-code", version: "1" } } });
+  const sid = init.headers.get("mcp-session-id")!;
+  await init.body?.cancel();
+  await (await post({ jsonrpc: "2.0", method: "notifications/initialized" }, sid)).body?.cancel();
+  return sid;
+};
+const call = async (sid: string, name: string, args: object) => await (await post({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: args } }, sid)).text();
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+describe("rejoin through the MCP endpoint", () => {
+  test("the MCP server restarts and the chat joins again seconds later: same agent, no suffix, one in the list", async () => {
+    const old = await connect();
+    await call(old, "jam_join", { repo: "jamsesh", cwd: "/work/jamsesh" });
+    const first = hub.session.agents().find((a) => a.cwd === "/work/jamsesh")!;
+    await call(old, "jam_inbox", {}); // active a moment ago; the client then restarts and never says goodbye
+    await wait(5);
+    const fresh_ = await connect();
+    await call(fresh_, "jam_join", { repo: "jamsesh", cwd: "/work/jamsesh" });
+    const all = hub.session.agents().filter((a) => a.cwd === "/work/jamsesh");
+    expect(all).toHaveLength(1);
+    expect(all[0]!.id).toBe(first.id);
+    expect(all[0]!.name).toBe(first.name);
+    expect(all[0]!.chatId).toBe(`mcp:${fresh_}`);
+  });
+
+  test("a connection still in use is not taken over; one that was taken over joins again as its own agent", async () => {
+    const a = await connect();
+    await call(a, "jam_join", { repo: "api", cwd: "/work/api" });
+    await wait(5);
+    const b = await connect();
+    await wait(5);
+    await call(a, "jam_inbox", {}); // a speaks after b began: it is live
+    await call(b, "jam_join", { repo: "api", cwd: "/work/api" });
+    expect(hub.session.agents().filter((x) => x.cwd === "/work/api")).toHaveLength(2);
+    // c goes quiet, d begins and joins over c's record; c then speaks and must join again, as a second agent.
+    const c = await connect();
+    await call(c, "jam_join", { repo: "web", cwd: "/work/web" });
+    await wait(5);
+    const d = await connect();
+    await call(d, "jam_join", { repo: "web", cwd: "/work/web" });
+    expect(hub.session.agents().filter((x) => x.cwd === "/work/web")).toHaveLength(1);
+    expect(await call(c, "jam_inbox", {})).toContain("Call jam_join first");
+    await call(c, "jam_join", { repo: "web", cwd: "/work/web" });
+    expect(hub.session.agents().filter((x) => x.cwd === "/work/web")).toHaveLength(2);
   });
 });
