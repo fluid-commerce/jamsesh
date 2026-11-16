@@ -1,6 +1,6 @@
 // Voiceprints with a local speaker-embedding model (WeSpeaker ResNet34 through
 // sherpa-onnx). A person's voiceprint is the mean of their labelled samples.
-import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "../config";
 import type { Store, VoiceKind } from "../store";
@@ -16,6 +16,18 @@ let loadCode: VoiceStatus["code"] = "ok";
 /** Where people get the speaker model; it is the file the app bundles as models/wespeaker_en.onnx. */
 const MODEL_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx";
 
+/** A package folder's entry file: its package.json "main", or index.js. */
+export function libraryEntry(dir: string): string {
+  let main = "index.js";
+  try {
+    const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+    if (typeof pkg.main === "string" && pkg.main) main = pkg.main;
+  } catch {
+    // No readable package.json: fall back to index.js, and the require reports what's missing.
+  }
+  return join(dir, main);
+}
+
 function getExtractor(): Extractor | null {
   if (extractor !== undefined) return extractor;
   try {
@@ -23,9 +35,11 @@ function getExtractor(): Extractor | null {
       loadCode = "missing-model";
       throw new Error("the speaker model (wespeaker_en.onnx) isn't in the models folder");
     }
-    // Inside the Mac app the hub is one compiled program; the native library sits beside it.
+    // Inside the Mac app the hub is one compiled program; the native library sits beside it. A
+    // compiled Bun program can't resolve a package by name or by its folder, only by a file, so it
+    // is loaded through the entry file its package.json names.
     loadCode = "missing-library";
-    const sherpa = config.nodeModules ? createRequire(join(config.nodeModules, "index.js"))("sherpa-onnx-node") : require("sherpa-onnx-node");
+    const sherpa = config.nodeModules ? require(libraryEntry(join(config.nodeModules, "sherpa-onnx-node"))) : require("sherpa-onnx-node");
     loadCode = "load-failed";
     extractor = new sherpa.SpeakerEmbeddingExtractor({ model: config.speakerModel, numThreads: 2, debug: 0 });
     loadCode = "ok";
