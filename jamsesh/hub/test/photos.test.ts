@@ -32,7 +32,12 @@ test("a saved photo is in the team folder, is served from /photos, and survives 
     // Read-only, contained, and not served without a credential.
     expect((await fetch(`${base}${saved.photo}`, { method: "POST", headers: window })).status).toBe(405);
     expect((await fetch(`${base}/photos/nope.png`, { headers: window })).status).toBe(404);
-    expect((await fetch(`${base}/photos/%2e%2e%2fteam.db`, { headers: window })).status).not.toBe(200);
+    // An escaped "../" never reaches the photos route (it takes plain file names only), so the team database is never served;
+    // what answers instead is whatever the hub serves for an unknown page (the web app's page when it's built, else not found).
+    for (const escape of ["%2e%2e%2fteam.db", "..%2fteam.db", "%2e%2e/team.db"]) {
+      const res = await fetch(`${base}/photos/${escape}`, { headers: window });
+      expect(new TextDecoder().decode((await res.arrayBuffer()).slice(0, 15))).not.toBe("SQLite format 3");
+    }
     expect((await fetch(`${base}${saved.photo}`, { headers: { "x-forwarded-for": "9.9.9.9" } })).status).toBeGreaterThanOrEqual(400);
     await hub.stop();
   } finally {

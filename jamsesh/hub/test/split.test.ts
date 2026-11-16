@@ -94,8 +94,9 @@ test("two people talking over the same span at their own laptops are two lines (
   expect(r.asked).toHaveLength(2);
 });
 
-test("a quieter copy within the threshold is transcribed: the same words stay one line, other words are another", async () => {
-  for (const [other, count] of [["Put the pricing page up", 1], ["Put the pricing page cup", 2]] as const) {
+test("a quieter copy within the threshold is transcribed: the same or nearly the same words stay one line, other words are another", async () => {
+  // A copy heard at the same moment that differs by a misheard word is the same line (one sentence, two mics); different words are another line.
+  for (const [other, count] of [["Put the pricing page up", 1], ["Put the pricing page cup", 1], ["The header is too tall", 2]] as const) {
     const r = room();
     const t0 = t();
     await r.hear("lap-a", t0, mix(3, [A(3), 1]), "Put the pricing page up.");
