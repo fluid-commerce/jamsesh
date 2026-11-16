@@ -24,6 +24,8 @@ export interface Person {
   /** What the voiceprint was learned from: reads aloud, corrections, lines heard. */
   voiceLearned?: { read: number; corrections: number; heard: number };
   createdAt: number;
+  /** In this session: a window open now, or joined, spoke or was assigned speech since it began. Old team members are false until they show up. */
+  here: boolean;
   /** Profile photo URL (from the person's camera), or null. */
   photo?: string | null;
 }

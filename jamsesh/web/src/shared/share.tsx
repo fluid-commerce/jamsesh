@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, hub, useHub, type Person, type Share } from "./hub";
 import { getIdentity } from "./identity";
 import { uuid } from "./offline";
+import { usePhoto } from "./ui";
 import { activePublication, localPublication, mediaAvailable, publicationStopped, publish, receiveStats, renamePublication, screenUnavailable, stopPublishing, useWatch, usePublications } from "./rtc";
 import "./share.css";
 
@@ -31,8 +32,9 @@ function initialsOf(name: string) {
 
 /** Same look as the Avatar in ui.tsx, but shows the person's profile photo when they have one. */
 export function PhotoAvatar({ person, size = 28 }: { person: Pick<Person, "name" | "color" | "photo">; size?: number }) {
-  return person.photo ? (
-    <img className="avatar shr-photo-avatar" src={person.photo} alt={person.name} title={person.name} style={{ width: size, height: size }} />
+  const pic = usePhoto(person.photo);
+  return pic.src ? (
+    <img className="avatar shr-photo-avatar" src={pic.src} onError={pic.onError} alt={person.name} title={person.name} style={{ width: size, height: size }} />
   ) : (
     <span className="avatar" style={{ background: person.color, width: size, height: size, fontSize: size * 0.42 }} title={person.name}>
       {initialsOf(person.name)}

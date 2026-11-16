@@ -844,6 +844,17 @@ function Onboarding({ state, onPick }: { state: HubState; onPick: (id: string) =
   const existing = state.people.find((p) => p.name.toLowerCase() === qsName.toLowerCase());
   const [name, setName] = useState(qsName);
   const [role, setRole] = useState("");
+  const [showBefore, setShowBefore] = useState(false);
+  // People already in this session first; the team's other people stay one tap away so they keep their voice.
+  const here = state.people.filter((p) => p.here);
+  const before = state.people.filter((p) => !p.here);
+  const pick = (p: HubState["people"][number]) => (
+    <button key={p.id} className="btn person-pick" onClick={() => onPick(p.id)}>
+      <PhotoAvatar person={p} size={28} />
+      <span className="ellipsis">I'm {p.name}</span>
+      {p.role && <span className="ellipsis" style={{ color: "var(--dim)", marginLeft: "auto", paddingRight: 6, flex: "0 1 auto" }}>{p.role}</span>}
+    </button>
+  );
   useEffect(() => {
     if (existing) onPick(existing.id);
   }, [existing?.id]);
@@ -859,16 +870,18 @@ function Onboarding({ state, onPick }: { state: HubState; onPick: (id: string) =
         <WhereChooser />
         {state.people.length > 0 && (
           <div style={{ display: "grid", gap: 6, margin: "18px 0" }}>
-            {state.people.map((p) => (
-              <button key={p.id} className="btn person-pick" onClick={() => onPick(p.id)}>
-                <PhotoAvatar person={p} size={28} />
-                <span className="ellipsis">I'm {p.name}</span>
-                {p.role && <span className="ellipsis" style={{ color: "var(--dim)", marginLeft: "auto", paddingRight: 6, flex: "0 1 auto" }}>{p.role}</span>}
-              </button>
-            ))}
+            {here.map(pick)}
+            {before.length > 0 && (
+              <>
+                <button className="btn ghost small" style={{ justifySelf: "start" }} aria-expanded={showBefore} onClick={() => setShowBefore(!showBefore)}>
+                  Someone from before ({before.length}) {showBefore ? "▴" : "▾"}
+                </button>
+                {showBefore && before.map(pick)}
+              </>
+            )}
           </div>
         )}
-        {state.people.length > 0 && (
+        {here.length > 0 && (
           <div className="row" style={{ gap: 12, margin: "6px 0 4px", color: "var(--dim)", fontSize: 13 }}>
             <span style={{ flex: 1, height: 1, background: "var(--line-2)" }} />
             or someone new

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ago, api, hub, removedChatsSource, useHub, type Person, type Settings as S } from "./hub";
+import { ago, api, hereFirst, hub, removedChatsSource, useHub, type Person, type Settings as S } from "./hub";
 import { Avatar, Meter, Section, Toggle } from "./ui";
 import { ScreenIcon } from "./icons";
 import { clip, soundAllowed } from "./sound";
@@ -221,7 +221,7 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
                   style={{ width: 150, padding: "6px 8px" }}
                 >
                   <option value="">Nobody (room)</option>
-                  {state.people.map((p) => (
+                  {hereFirst(state.people).map((p) => (
                     <option key={p.id} value={p.id}>
                       {p.name}
                     </option>

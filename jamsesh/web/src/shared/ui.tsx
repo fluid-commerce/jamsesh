@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState
 import qrcode from "qrcode-generator";
 import { readPref } from "./identity";
 import { useSilent } from "./sound";
-import { ago, api, hub, useHub, type Agent, type Artifact, type Directive, type FontInfo, type HubState, type JamEvent, type Person, type Share } from "./hub";
+import { ago, api, hereFirst, hub, useHub, type Agent, type Artifact, type Directive, type FontInfo, type HubState, type JamEvent, type Person, type Share } from "./hub";
 import { useArtSrc } from "./frames";
 import { FeedAttachments } from "./attach";
 import { isOpaqueFrame, pointerRecording } from "./pointer";
@@ -27,8 +27,17 @@ export function initials(name: string) {
   return (parts[0]?.[0] ?? "?").toUpperCase() + (parts[1]?.[0]?.toUpperCase() ?? "");
 }
 
+/** A profile photo that's safe to show: null once it fails to load (a missing file, an expired link), so the
+ * avatar falls back to initials instead of a broken image. A new photo is tried again. */
+export function usePhoto(photo: string | null | undefined): { src: string | null; onError: () => void } {
+  const [failed, setFailed] = useState<string | null>(null);
+  const src = photo && photo !== failed ? photo : null;
+  return { src, onError: () => setFailed(photo ?? null) };
+}
+
 export function Avatar({ name, color, size = 28, photo }: { name: string; color: string; size?: number; photo?: string | null }) {
-  if (photo) return <img className="avatar" src={photo} alt={name} title={name} style={{ width: size, height: size, objectFit: "cover", border: `2px solid ${color}` }} />;
+  const pic = usePhoto(photo);
+  if (pic.src) return <img className="avatar" src={pic.src} onError={pic.onError} alt={name} title={name} style={{ width: size, height: size, objectFit: "cover", border: `2px solid ${color}` }} />;
   return (
     <span className="avatar" style={{ background: color, width: size, height: size, fontSize: size * 0.42 }} title={name}>
       {initials(name)}
@@ -900,7 +909,7 @@ function SpeakerPopover({ state, ev, x, y, onClose }: { state: HubState; ev: Jam
             {state.voiceprints?.neverUsed && <div style={{ color: "var(--warn)", marginTop: 4 }}>Voice matching hasn't named any of the last {state.voiceprints.lines} lines. Check the host's speaker model.</div>}
           </div>
         )}
-        {state.people.map((p) => (
+        {hereFirst(state.people).map((p) => (
           <button key={p.id} className="item" onClick={() => assign({ personId: p.id })}>
             <Avatar name={p.name} color={p.color} size={22} photo={p.photo} />
             <span className="grow">{p.name}</span>

@@ -87,6 +87,8 @@ export class Session {
   /** This session's id; the team store remembers every session. */
   sessionId: string;
   startedAt = Date.now();
+  /** When this session began (kept across hub restarts); who is "here" is measured from it. */
+  private hereSince = this.startedAt;
   canvas: CanvasInfo = { status: "off", editLink: null, viewLink: null, wsEdit: null, wsView: null, reason: null, generation: 0 };
   brainStatus: HubState["brain"] = { status: "ready", lastError: null };
   private waiters = new Map<string, Set<Waiter>>();
@@ -122,7 +124,10 @@ export class Session {
     store.setSetting("sessionId", this.sessionId);
     const sessions = store.setting<{ id: string; name: string; startedAt: number; lastActive: number }[]>("sessions", []);
     const me = sessions.find((x) => x.id === this.sessionId);
-    if (me) me.lastActive = Date.now();
+    if (me) {
+      me.lastActive = Date.now();
+      this.hereSince = me.startedAt || this.startedAt;
+    }
     else sessions.push({ id: this.sessionId, name: store.setting("sessionName", "Jam session"), startedAt: Date.now(), lastActive: Date.now() });
     store.setSetting("sessions", sessions.slice(-200));
     this.migrateChatKeys();
@@ -439,10 +444,23 @@ export class Session {
       samples.set(s.personId, n);
     }
     const total = (n?: Person["voiceLearned"]) => (n ? n.read + n.corrections + n.heard : 0);
+    const here = this.hereNow();
     return this.store
       .all("people")
-      .map((p) => ({ ...p, voiceSamples: total(samples.get(p.id)), voiceLearned: samples.get(p.id), hasVoiceprint: total(samples.get(p.id)) > 0 }))
+      .map((p) => ({ ...p, here: here.has(p.id) || p.createdAt >= this.hereSince, voiceSamples: total(samples.get(p.id)), voiceLearned: samples.get(p.id), hasVoiceprint: total(samples.get(p.id)) > 0 }))
       .sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  /** Who is in this session: a window open now, a window used since it began, or speech heard or assigned in it. The team store keeps everyone the host has met; this is who is actually here. */
+  private hereNow(): Set<string> {
+    const ids = new Set<string>();
+    const atHost = this.store.setting<string>("hostPersonId", "");
+    for (const d of this.store.all("devices")) {
+      const person = d.personId ?? (d.kind === "host" && atHost ? atHost : null);
+      if (person && (d.lastSeen >= this.hereSince || this.deviceOnline(d.id))) ids.add(person);
+    }
+    for (const u of this.store.all("utterances")) if (u.personId) ids.add(u.personId);
+    return ids;
   }
 
   person(id: string | null | undefined) {
@@ -508,6 +526,8 @@ export class Session {
       hasVoiceprint: false,
       voiceSamples: 0,
       createdAt: Date.now(),
+      // Worked out fresh by people(); someone just added is here.
+      here: true,
     };
     this.store.put("people", p);
     this.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: `${p.name}${p.role ? ` (${p.role})` : ""} joined the room.` });
