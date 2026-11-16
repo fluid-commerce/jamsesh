@@ -37,6 +37,9 @@ interface Ctx {
   harness?: string;
   /** Who opened this session (see McpEndpoint.owner): every later request must come from the same. */
   owner?: string;
+  /** When this connection began, and when it last made any request: a restarted client leaves its old session open and silent. */
+  started?: number;
+  lastRequest?: number;
 }
 
 /** A remote URL without the credentials some people have embedded in it. */
@@ -357,6 +360,7 @@ export class McpEndpoint {
       // A session id is only good from the credential's own machine: another paired device that
       // learned it gets "not found", the same as a session that never existed.
       if (s.ctx.owner !== this.owner(device)) return Response.json({ jsonrpc: "2.0", error: { code: -32001, message: "Session not found" }, id: null }, { status: 404 });
+      s.ctx.lastRequest = Date.now();
       s.ctx.device = device;
       s.ctx.ip = ip;
       if (origin) s.ctx.origin = origin;
@@ -364,7 +368,7 @@ export class McpEndpoint {
     }
     // An unknown session (the hub restarted): 404 tells the client to start a new one.
     if (sid || req.method !== "POST") return Response.json({ jsonrpc: "2.0", error: { code: -32001, message: "Session not found" }, id: null }, { status: 404 });
-    const ctx: Ctx = { agentId: null, ip, device, origin, owner: this.owner(device) };
+    const ctx: Ctx = { agentId: null, ip, device, origin, owner: this.owner(device), started: Date.now(), lastRequest: Date.now() };
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
       // The SDK's own cap (4 MB) is lower than the one limit this hub states for an image: use that one.
@@ -420,6 +424,11 @@ export class McpEndpoint {
   private requireAgent(ctx: Ctx): Agent {
     const a = this.hub.session.agent(ctx.agentId);
     if (!a && ctx.agentId && this.hub.session.removedAgents.has(ctx.agentId)) throw new Error("The room removed you from this session. Don't join again unless your person asks you to.");
+    // Another connection took this agent over (this one went quiet while it restarted): it joins again as its own agent.
+    if (a && ctx.sessionId && a.chatId?.startsWith("mcp:") && a.chatId !== `mcp:${ctx.sessionId}`) {
+      ctx.agentId = null;
+      throw new Error("Call jam_join first. (A newer connection took over this chat's place in the session; join again to be your own agent.)");
+    }
     if (!a) throw new Error("Call jam_join first. (If you were already in the session, the hub restarted: call jam_join again with the same details to pick up where you left off.)");
     this.hub.session.touchAgent(a.id);
     return a;
@@ -575,6 +584,11 @@ export class McpEndpoint {
           name: args.name,
           // A record from an earlier credential of this same Mac (its owner window) can be taken over.
           sameMachine: (old) => this.hub.auth.machineOf(old) === machine,
+          // An older connection's agent is gone if its session has closed, or made no request since this one began.
+          connectionGone: (old) => {
+            const c = this.sessions.get(old.chatId?.startsWith("mcp:") ? old.chatId.slice(4) : "")?.ctx;
+            return !c || (c.lastRequest ?? 0) < (ctx.started ?? 0);
+          },
         });
         ctx.agentId = agent.id;
         const first = !ctx.skillSent;

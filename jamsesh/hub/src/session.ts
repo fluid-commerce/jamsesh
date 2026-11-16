@@ -45,6 +45,9 @@ import type {
 export const LONG_TEXT = 1200;
 
 /** An agent quiet this long shows as offline (and its record can be taken over by a rejoin). */
+/** A chat id that is only an MCP connection's (see McpEndpoint's jam_join), not a chat's own word. */
+const isTransportChat = (chatId: string | undefined): chatId is string => !!chatId && chatId.startsWith("mcp:");
+
 export const AGENT_OFFLINE_MS = 20 * 60_000;
 /** An open task nobody has acked or reported on for this long gets a nudge to its agent; after the grace the room is offered a reassignment. */
 export const TASK_STALE_MS = 20 * 60_000;
@@ -634,6 +637,8 @@ export class Session {
     broadcasts?: boolean;
     /** Whether an older record's `machine` is the caller's machine under an earlier credential. */
     sameMachine?: (machine: string) => boolean;
+    /** Whether an older record's own connection is gone (closed, or silent since this chat's began). Without it, a minute's quiet counts. */
+    connectionGone?: (old: Agent) => boolean;
   }): { agent: Agent; resumed: boolean; quietMs: number | null } {
     const owner = this.personByName(info.ownerName) ?? (info.ownerName ? this.upsertPerson({ name: info.ownerName }) : undefined);
     const agents = this.store.all("agents");
@@ -658,6 +663,19 @@ export class Session {
             // by another chat, however long it has been quiet or wherever the newcomer joins from.
             .filter((a) => !a.chatId)
             .filter((a) => now - a.lastSeen > AGENT_OFFLINE_MS || !!info.sameMachine?.(a.machine))
+            .sort((a, b) => b.lastSeen - a.lastSeen)[0]
+        : undefined) ??
+      // A transport id (`mcp:<session>`) is only the connection's, and it changes when the MCP server restarts. A
+      // chat that joins under one resumes the quiet record of an earlier connection from the same person, machine,
+      // folder and harness (keeping its id and name, taking the new chat id). A record whose connection made a
+      // request after the newcomer's began is live: two real chats share the folder, and the newcomer is its own
+      // agent. An older connection that speaks again after being taken over is sent back through jam_join (mcp.ts),
+      // which makes it a second agent: it never takes its place back. A chat that names its own id (`args.chat`) is never matched this way.
+      (isTransportChat(info.chatId) && owner
+        ? agents
+            .filter((a) => isTransportChat(a.chatId) && a.chatId !== info.chatId && a.ownerId === owner.id && a.harness === info.harness && !!info.cwd && a.cwd === info.cwd)
+            .filter((a) => a.machine === info.machine || !!info.sameMachine?.(a.machine))
+            .filter((a) => (info.connectionGone ? info.connectionGone(a) : now - a.lastSeen > 60_000))
             .sort((a, b) => b.lastSeen - a.lastSeen)[0]
         : undefined);
     const harnessLabel = info.harness === "codex" ? "Codex" : info.harness === "claude-code" ? "Claude" : "Agent";
