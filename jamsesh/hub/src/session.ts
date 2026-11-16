@@ -44,6 +44,9 @@ import type {
 export const LONG_TEXT = 1200;
 
 /** An agent quiet this long shows as offline (and its record can be taken over by a rejoin). */
+/** A chat id that is only an MCP connection's (see McpEndpoint's jam_join), not a chat's own word. */
+const isTransportChat = (chatId: string | undefined): chatId is string => !!chatId && chatId.startsWith("mcp:");
+
 export const AGENT_OFFLINE_MS = 20 * 60_000;
 /** An open task nobody has acked or reported on for this long gets a nudge to its agent; after the grace the room is offered a reassignment. */
 export const TASK_STALE_MS = 20 * 60_000;
@@ -627,6 +630,18 @@ export class Session {
             // by another chat, however long it has been quiet or wherever the newcomer joins from.
             .filter((a) => !a.chatId)
             .filter((a) => now - a.lastSeen > AGENT_OFFLINE_MS || !!info.sameMachine?.(a.machine))
+            .sort((a, b) => b.lastSeen - a.lastSeen)[0]
+        : undefined) ??
+      // A transport id (`mcp:<session>`) is only the connection's, and it changes when the MCP server restarts. A
+      // chat that joins under one resumes the quiet record of an earlier connection from the same person, machine,
+      // folder and harness (keeping its id and name, taking the new chat id). A record seen in the last minute is
+      // still live in another connection: two real chats share the folder, and the newcomer is its own agent. A
+      // chat that names its own id (`args.chat`) is never matched this way.
+      (isTransportChat(info.chatId) && owner
+        ? agents
+            .filter((a) => isTransportChat(a.chatId) && a.chatId !== info.chatId && a.ownerId === owner.id && a.harness === info.harness && !!info.cwd && a.cwd === info.cwd)
+            .filter((a) => a.machine === info.machine || !!info.sameMachine?.(a.machine))
+            .filter((a) => now - a.lastSeen > 60_000)
             .sort((a, b) => b.lastSeen - a.lastSeen)[0]
         : undefined);
     const harnessLabel = info.harness === "codex" ? "Codex" : info.harness === "claude-code" ? "Claude" : "Agent";
