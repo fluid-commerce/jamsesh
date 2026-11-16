@@ -579,6 +579,11 @@ export function deviceId(kind: string) {
   return readDeviceId(kind);
 }
 
+/** People in this session first, then everyone the team store remembers; each group keeps its order. */
+export function hereFirst<T extends { here: boolean }>(people: T[]): T[] {
+  return [...people.filter((p) => p.here), ...people.filter((p) => !p.here)];
+}
+
 export function pref(key: string, fallback = ""): string {
   return readPref(key, fallback);
 }

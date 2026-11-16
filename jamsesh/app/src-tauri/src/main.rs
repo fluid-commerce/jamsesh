@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use projects::Launch;
 use serde::{Deserialize, Serialize};
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -55,6 +55,10 @@ struct Config {
     /// picker again rather than the last project.
     #[serde(default)]
     lobby: bool,
+    /// Set just before the app restarts itself (Screen Recording takes effect after a relaunch), so that one
+    /// launch comes back into the same session. Cleared as soon as it's read.
+    #[serde(default)]
+    resume_once: bool,
 }
 
 #[derive(Default)]
@@ -74,6 +78,8 @@ struct App {
     screens: screens::Runtime,
     /// What the menu bar menu shows now; it's only rebuilt when this changes (an open menu stays open).
     tray_shown: std::sync::Mutex<String>,
+    /// The same for the Session menu in the app's menu bar.
+    menu_shown: std::sync::Mutex<String>,
     hosts: discover::Hosts,
     dir: PathBuf,
     /// Heartbeats from the windows' pages (see watchdog.rs).
@@ -828,76 +834,139 @@ async fn refresh_tray(app: &AppHandle) {
         None => None,
     };
     let Some(tray) = app.tray_by_id("main") else { return };
-    let shown = format!("{role:?}|{label}|{code:?}|{present:?}|{userless}|{lobby}|{project:?}|{recent:?}");
-    if let Ok(mut last) = state.tray_shown.lock() {
-        if *last == shown {
-            return;
-        }
-        *last = shown;
-    }
-    let build = || -> tauri::Result<Menu<tauri::Wry>> {
-        let menu = Menu::new(app)?;
-        match role.as_deref() {
-            Some("host") if lobby => {
-                menu.append(&MenuItem::with_id(app, "status", "Choosing a project", false, None::<&str>)?)?;
-                menu.append(&PredefinedMenuItem::separator(app)?)?;
-                menu.append(&MenuItem::with_id(app, "open", "Open the Projects window", true, None::<&str>)?)?;
-                menu.append(&projects_submenu(app, &recent, None)?)?;
-                menu.append(&PredefinedMenuItem::separator(app)?)?;
-                menu.append(&MenuItem::with_id(app, "leave", "Stop hosting", true, None::<&str>)?)?;
-            }
-            Some("host") => {
-                menu.append(&MenuItem::with_id(app, "status", "Hosting a session", false, None::<&str>)?)?;
-                if let Some(p) = &present {
-                    menu.append(&MenuItem::with_id(app, "present", p, false, None::<&str>)?)?;
-                }
-                menu.append(&MenuItem::with_id(app, "code", format!("Join code: {}", code.as_deref().unwrap_or("…")), false, None::<&str>)?)?;
-                menu.append(&PredefinedMenuItem::separator(app)?)?;
-                menu.append(&projects_submenu(app, &recent, project.as_deref())?)?;
-                menu.append(&PredefinedMenuItem::separator(app)?)?;
-                menu.append(&MenuItem::with_id(app, "open", "Open my window", true, None::<&str>)?)?;
-                menu.append(&MenuItem::with_id(app, "mute", "Mute or unmute my mic", true, None::<&str>)?)?;
-                menu.append(&MenuItem::with_id(app, "muteroom", "Mute or unmute the room mic", true, None::<&str>)?)?;
-                menu.append(&MenuItem::with_id(app, "bigscreen", "Show the big screen", true, None::<&str>)?)?;
-                menu.append(&MenuItem::with_id(app, "screens", "Screens…", true, None::<&str>)?)?;
-                menu.append(&PredefinedMenuItem::separator(app)?)?;
-                menu.append(&MenuItem::with_id(app, "agents", "Connect my agents", true, None::<&str>)?)?;
-                menu.append(&tauri::menu::CheckMenuItem::with_id(
-                    app,
-                    "userless",
-                    "Use every display (nobody uses this Mac)",
-                    true,
-                    userless,
-                    None::<&str>,
-                )?)?;
-                menu.append(&MenuItem::with_id(app, "setup", "Set up this Mac…", true, None::<&str>)?)?;
-                menu.append(&MenuItem::with_id(app, "remote", "Set up remote access…", true, None::<&str>)?)?;
-                menu.append(&PredefinedMenuItem::separator(app)?)?;
-                menu.append(&MenuItem::with_id(app, "leave", "Stop hosting", true, None::<&str>)?)?;
-            }
-            Some("join") => {
-                menu.append(&MenuItem::with_id(app, "status", format!("Joined {label}"), false, None::<&str>)?)?;
-                if let Some(p) = &present {
-                    menu.append(&MenuItem::with_id(app, "present", p, false, None::<&str>)?)?;
-                }
-                menu.append(&PredefinedMenuItem::separator(app)?)?;
-                menu.append(&MenuItem::with_id(app, "open", "Open my window", true, None::<&str>)?)?;
-                menu.append(&MenuItem::with_id(app, "mute", "Mute or unmute my mic", true, None::<&str>)?)?;
-                menu.append(&MenuItem::with_id(app, "agents", "Connect my agents", true, None::<&str>)?)?;
-                menu.append(&PredefinedMenuItem::separator(app)?)?;
-                menu.append(&MenuItem::with_id(app, "leave", "Leave the session", true, None::<&str>)?)?;
-            }
-            _ => {
-                menu.append(&MenuItem::with_id(app, "open", "Host or join a session…", true, None::<&str>)?)?;
-            }
-        }
-        menu.append(&PredefinedMenuItem::separator(app)?)?;
-        menu.append(&MenuItem::with_id(app, "quit", "Quit JamSesh", true, None::<&str>)?)?;
-        Ok(menu)
-    };
-    if let Ok(menu) = build() {
+    // Each menu is rebuilt only when what it shows changes, so an open menu stays open. The Session menu doesn't
+    // show the join code or who's here, so their changes leave it alone.
+    let changed = |shown: &std::sync::Mutex<String>, key: String| shown.lock().map(|mut last| last.as_str() != key && { *last = key; true }).unwrap_or(true);
+    let tray_changed = changed(&state.tray_shown, format!("{role:?}|{label}|{code:?}|{present:?}|{userless}|{lobby}|{project:?}|{recent:?}"));
+    let menu_changed = changed(&state.menu_shown, format!("{role:?}|{userless}|{lobby}|{project:?}|{recent:?}"));
+    let shown = Shown { role, label, code, present, userless, lobby, project, recent };
+    if tray_changed && let Ok(menu) = tray_menu(app, &shown) {
         let _ = tray.set_menu(Some(menu));
     }
+    if menu_changed && let Ok(menu) = app_menu(app, &shown) {
+        let _ = app.set_menu(menu);
+    }
+}
+
+/// What the menus show, as refresh_tray last read it.
+struct Shown {
+    role: Option<String>,
+    label: String,
+    code: Option<String>,
+    present: Option<String>,
+    userless: bool,
+    lobby: bool,
+    project: Option<String>,
+    recent: Vec<projects::Recent>,
+}
+
+type Items = Vec<Box<dyn IsMenuItem<tauri::Wry>>>;
+
+fn item(app: &AppHandle, items: &mut Items, id: &str, text: impl AsRef<str>, enabled: bool) -> tauri::Result<()> {
+    items.push(Box::new(MenuItem::with_id(app, id, text, enabled, None::<&str>)?));
+    Ok(())
+}
+
+fn separator(app: &AppHandle, items: &mut Items) -> tauri::Result<()> {
+    items.push(Box::new(PredefinedMenuItem::separator(app)?));
+    Ok(())
+}
+
+/// The session's own commands. The menu bar icon (`full`) also shows who's here, the join code and the setup
+/// items; the Session menu in the app's menu bar keeps to what's done with the session. Both send the same ids
+/// to `on_menu`.
+fn session_items(app: &AppHandle, s: &Shown, full: bool) -> tauri::Result<Items> {
+    let mut v: Items = Vec::new();
+    match s.role.as_deref() {
+        Some("host") if s.lobby => {
+            if full {
+                item(app, &mut v, "status", "Choosing a project", false)?;
+                separator(app, &mut v)?;
+            }
+            item(app, &mut v, "open", "Open the Projects window", true)?;
+            v.push(Box::new(projects_submenu(app, &s.recent, None)?));
+            separator(app, &mut v)?;
+            item(app, &mut v, "leave", "Stop hosting", true)?;
+        }
+        Some("host") => {
+            if full {
+                item(app, &mut v, "status", "Hosting a session", false)?;
+                if let Some(p) = &s.present {
+                    item(app, &mut v, "present", p, false)?;
+                }
+                item(app, &mut v, "code", format!("Join code: {}", s.code.as_deref().unwrap_or("…")), false)?;
+                separator(app, &mut v)?;
+                v.push(Box::new(projects_submenu(app, &s.recent, s.project.as_deref())?));
+                separator(app, &mut v)?;
+            }
+            item(app, &mut v, "open", "Open my window", true)?;
+            if full {
+                item(app, &mut v, "mute", "Mute or unmute my mic", true)?;
+                item(app, &mut v, "muteroom", "Mute or unmute the room mic", true)?;
+            }
+            item(app, &mut v, "bigscreen", "Show the big screen", true)?;
+            item(app, &mut v, "screens", "Screens…", true)?;
+            if !full {
+                separator(app, &mut v)?;
+                v.push(Box::new(projects_submenu(app, &s.recent, s.project.as_deref())?));
+            }
+            separator(app, &mut v)?;
+            if full {
+                item(app, &mut v, "agents", "Connect my agents", true)?;
+            }
+            v.push(Box::new(CheckMenuItem::with_id(app, "userless", "Use every display (nobody uses this Mac)", true, s.userless, None::<&str>)?));
+            if full {
+                item(app, &mut v, "setup", "Set up this Mac…", true)?;
+                item(app, &mut v, "remote", "Set up remote access…", true)?;
+            }
+            separator(app, &mut v)?;
+            item(app, &mut v, "leave", "Stop hosting", true)?;
+        }
+        Some("join") => {
+            if full {
+                item(app, &mut v, "status", format!("Joined {}", s.label), false)?;
+                if let Some(p) = &s.present {
+                    item(app, &mut v, "present", p, false)?;
+                }
+                separator(app, &mut v)?;
+            }
+            item(app, &mut v, "open", "Open my window", true)?;
+            item(app, &mut v, "mute", "Mute or unmute my mic", true)?;
+            if full {
+                item(app, &mut v, "agents", "Connect my agents", true)?;
+            }
+            separator(app, &mut v)?;
+            item(app, &mut v, "leave", "Leave the session", true)?;
+        }
+        _ => item(app, &mut v, "open", "Host or join a session…", true)?,
+    }
+    Ok(v)
+}
+
+fn tray_menu(app: &AppHandle, s: &Shown) -> tauri::Result<Menu<tauri::Wry>> {
+    let items = session_items(app, s, true)?;
+    let mut refs: Vec<&dyn IsMenuItem<tauri::Wry>> = items.iter().map(|i| i.as_ref()).collect();
+    let tail: [Box<dyn IsMenuItem<tauri::Wry>>; 2] =
+        [Box::new(PredefinedMenuItem::separator(app)?), Box::new(MenuItem::with_id(app, "quit", "Quit JamSesh", true, None::<&str>)?)];
+    refs.extend(tail.iter().map(|i| i.as_ref()));
+    Menu::with_items(app, &refs)
+}
+
+/// The app's menu bar: Tauri's default menu with a Session menu after File. Its items send the same ids as the
+/// menu bar icon's, which `on_menu` takes (menu events from both reach the one handler set on the tray; the app
+/// menu's own Quit stays the default one).
+fn app_menu(app: &AppHandle, s: &Shown) -> tauri::Result<Menu<tauri::Wry>> {
+    let menu = Menu::default(app)?;
+    let items = session_items(app, s, false)?;
+    let refs: Vec<&dyn IsMenuItem<tauri::Wry>> = items.iter().map(|i| i.as_ref()).collect();
+    let session = Submenu::with_items(app, "Session", true, &refs)?;
+    let after_file = menu
+        .items()?
+        .iter()
+        .position(|i| i.as_submenu().is_some_and(|m| m.text().is_ok_and(|t| t == "File")))
+        .map_or(menu.items()?.len(), |at| at + 1);
+    menu.insert(&session, after_file)?;
+    Ok(menu)
 }
 
 /// The Projects submenu of the menu bar: the recent projects (the open one checked), all of them,
@@ -1033,6 +1102,8 @@ struct StartInfo {
     host_problem: Option<String>,
     last_host: Option<String>,
     last_host_name: Option<String>,
+    /// How this Mac hosted last: the room only (nobody uses it) rather than with the person's own window.
+    room_only: bool,
     resume_error: Option<String>,
 }
 
@@ -1046,6 +1117,7 @@ async fn start_info(app: AppHandle, state: State<'_, Arc<App>>) -> Result<StartI
         host_problem: problem,
         last_host: inner.cfg.host_url.clone(),
         last_host_name: inner.cfg.host_name.clone(),
+        room_only: inner.cfg.userless,
         resume_error: inner.resume_error.clone(),
     })
 }
@@ -1061,10 +1133,19 @@ fn discovery_status(state: State<'_, Arc<App>>) -> discover::Status {
 }
 
 #[tauri::command]
-async fn host_here(app: AppHandle, state: State<'_, Arc<App>>) -> Result<(), String> {
+async fn host_here(app: AppHandle, state: State<'_, Arc<App>>, room_only: bool) -> Result<(), String> {
     let ticket = state.switching.ticket();
     let Some(_turn) = state.switching.lock(ticket).await else { return Ok(()) };
     session_is(&state, Before::Idle).await?;
+    // Which way to host is chosen here, so the choice is saved before the hub starts.
+    {
+        let mut inner = state.inner.lock().await;
+        if inner.cfg.userless != room_only {
+            let next = Config { userless: room_only, ..inner.cfg.clone() };
+            state.save(&next)?;
+            inner.cfg = next;
+        }
+    }
     let started = start_hosting(&app, &state, Launch::Lobby { new_project: false }).await;
     rolled_back(&app, &state, started).await
 }
@@ -1291,6 +1372,16 @@ fn resume_launch(cfg: &Config) -> Launch {
     cfg.project.clone().map_or(Launch::Last, Launch::Project)
 }
 
+/// What a launch does with the saved session. Launching opens the start window and forgets the saved role, so the
+/// menu bar and the saved settings agree, unless the app restarted itself to come back into the same session
+/// (`resume_once`) or this is a room-only host (nobody uses that Mac to press Host). Returns the settings to run
+/// with and whether to resume the saved session.
+fn at_launch(cfg: Config) -> (Config, bool) {
+    let resume = cfg.resume_once || (cfg.role.as_deref() == Some("host") && cfg.userless);
+    let cfg = if resume { Config { resume_once: false, ..cfg } } else { Config { role: None, lobby: false, resume_once: false, ..cfg } };
+    (cfg, resume)
+}
+
 /// Screen Recording takes effect after a relaunch. Like Quit: the last turn, and the hub's acknowledged save, before
 /// the app reopens (into the same session). Made against the session it was asked in: a second Reopen queued behind
 /// the first does nothing. A save that didn't finish, now or before, blocks the reopen until the person chooses to
@@ -1338,6 +1429,18 @@ async fn reopen(app: &AppHandle, state: &App, ticket: Ticket, discard: bool) -> 
         turn.keep_running();
         leave_now(app, state).await;
         return Err(e);
+    }
+    // The restart comes back into this session; a launch otherwise opens the start window.
+    {
+        let mut inner = state.inner.lock().await;
+        let next = Config { resume_once: true, ..inner.cfg.clone() };
+        if let Err(e) = state.save(&next) {
+            drop(inner);
+            turn.keep_running();
+            leave_now(app, state).await;
+            return Err(e);
+        }
+        inner.cfg = next;
     }
     state.switching.ended.store(true, std::sync::atomic::Ordering::SeqCst);
     app.request_restart();
@@ -1390,12 +1493,20 @@ fn main() {
                 let text = format!("Earlier versions kept a copy of your voice on this Mac. JamSesh couldn't delete it:\n{list}\nDelete it in Finder; JamSesh will try again next time it opens.");
                 app.dialog().message(text).title("An old copy of your voice is still here").kind(MessageDialogKind::Warning).show(|_| {});
             }
-            let cfg: Config = std::fs::read(dir.join("app.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+            let saved: Config = std::fs::read(dir.join("app.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+            let (cfg, resume) = at_launch(saved.clone());
+            // Only a changed setting is written back; if that fails the same decision is made next launch.
+            if (cfg.role.as_deref(), cfg.lobby, cfg.resume_once) != (saved.role.as_deref(), saved.lobby, saved.resume_once)
+                && let Err(e) = write_config(&dir, &cfg)
+            {
+                eprintln!("{e}");
+            }
             let state = Arc::new(App {
                 inner: Mutex::new(Inner { cfg: cfg.clone(), ..Default::default() }),
                 hosts: discover::start(),
                 dir,
                 tray_shown: std::sync::Mutex::new(String::new()),
+                menu_shown: std::sync::Mutex::new(String::new()),
                 screens: Default::default(),
                 beats: Default::default(),
                 switching: Turns::new(),
@@ -1417,9 +1528,9 @@ fn main() {
             tauri::async_runtime::spawn(async move {
                 let resumed = {
                     let Some(_turn) = state.switching.lock(ticket).await else { return };
-                    let r = match (cfg.role.as_deref(), cfg.host_url.clone()) {
-                        (Some("host"), _) => start_hosting(&handle, &state, resume_launch(&cfg)).await,
-                        (Some("join"), Some(url)) => start_joining(&handle, &state, &url, None, None).await,
+                    let r = match (resume, cfg.role.as_deref(), cfg.host_url.clone()) {
+                        (true, Some("host"), _) => start_hosting(&handle, &state, resume_launch(&cfg)).await,
+                        (true, Some("join"), Some(url)) => start_joining(&handle, &state, &url, None, None).await,
                         _ => Err(String::new()),
                     };
                     // Say why on the start window instead of just showing it.
@@ -1721,6 +1832,35 @@ mod voice_copy_tests {
         let still: Config = serde_json::from_slice(&std::fs::read(dir.join("app.json")).unwrap()).unwrap();
         assert_eq!(still.project.as_deref(), Some("passport"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_launch_opens_the_start_window_unless_it_is_a_restart_or_a_room_only_host() {
+        let host = Config { role: Some("host".into()), project: Some("passport".into()), host_url: Some("http://a".into()), ..Default::default() };
+        // Hosting, in a project or at the picker: forgotten, but the last host stays for Rejoin.
+        for lobby in [false, true] {
+            let (cfg, resume) = at_launch(Config { lobby, ..host.clone() });
+            assert!(!resume && cfg.role.is_none() && !cfg.lobby);
+            assert_eq!(cfg.host_url.as_deref(), Some("http://a"));
+            assert_eq!(cfg.project.as_deref(), Some("passport"));
+        }
+        let joined = Config { role: Some("join".into()), host_url: Some("http://a".into()), ..Default::default() };
+        let (cfg, resume) = at_launch(joined.clone());
+        assert!(!resume && cfg.role.is_none() && cfg.host_url.as_deref() == Some("http://a"));
+        // Nothing saved: nothing to resume.
+        assert!(!at_launch(Config::default()).1);
+        // The app's own restart resumes whatever it was in, once.
+        for cfg in [host.clone(), joined, Config { lobby: true, ..host.clone() }] {
+            let (next, resume) = at_launch(Config { resume_once: true, ..cfg.clone() });
+            assert!(resume && !next.resume_once && next.role == cfg.role && next.lobby == cfg.lobby);
+        }
+        // A room-only host reopens its project; a host someone uses does not.
+        let (next, resume) = at_launch(Config { userless: true, ..host.clone() });
+        assert!(resume && next.role.as_deref() == Some("host"));
+        assert!(!at_launch(Config { role: Some("join".into()), userless: true, ..Default::default() }).1);
+        // Configs from before this field read as not a restart.
+        let old: Config = serde_json::from_str(r#"{"role":"host","project":"passport"}"#).unwrap();
+        assert!(!old.resume_once);
     }
 
     #[test]

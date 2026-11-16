@@ -622,9 +622,9 @@ function Welcome({ state }: { state: HubState }) {
           <div style={{ fontSize: 20, color: "var(--muted)", maxWidth: 560, lineHeight: 1.5 }}>
             Scan the code with your phone, or open the address on your laptop and type the code. To bring your agent, tell it the address and the code.
           </div>
-          {state.people.length > 0 && (
+          {state.people.some((p) => p.here) && (
             <div className="row" style={{ marginTop: 34, gap: 14, flexWrap: "wrap" }}>
-              {state.people.map((p) => (
+              {state.people.filter((p) => p.here).map((p) => (
                 <span key={p.id} className="row" style={{ gap: 8 }}>
                   <Avatar name={p.name} color={p.color} size={34} photo={p.photo} />
                   <span style={{ fontSize: 17 }}>{p.name}</span>

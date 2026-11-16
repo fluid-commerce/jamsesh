@@ -1,7 +1,7 @@
 // Beside the lock badge: start driving the screen you hold, hand it to someone, or drive together (SPEC 10.6).
 import { useEffect, useState } from "react";
 import { driveTogether, driverState, onlinePeople, passControl, startDriving, stopDriving } from "./driving";
-import { pref, type HubState } from "./hub";
+import { hereFirst, pref, type HubState } from "./hub";
 
 export function DriveControls({ state, screen }: { state: HubState; screen: string }) {
   const me = pref("personId");
@@ -28,7 +28,7 @@ export function DriveControls({ state, screen }: { state: HubState; screen: stri
       setNote(e instanceof Error ? e.message : "That didn't work.");
     }
   };
-  const others = state.people.filter((p) => p.id !== me);
+  const others = hereFirst(state.people.filter((p) => p.id !== me));
   const names = ds.drivers.filter((d) => d.id !== me).map((d) => d.name);
   return (
     <span className="drive-controls">

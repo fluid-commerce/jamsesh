@@ -47,7 +47,12 @@
       button.primary { background: var(--text); color: #111; border-color: transparent; }
       button.primary:hover { background: #fff; }
       button:disabled { opacity: 0.5; cursor: default; }
-      .hostcard { margin-top: auto; display: flex; align-items: center; gap: 14px; padding: 16px; border-radius: 14px; background: var(--panel); border: 1px solid var(--line); }
+      .hosting { margin-top: auto; }
+      .hosting h2 { margin-bottom: 8px; }
+      .hostcards { display: grid; gap: 8px; }
+      .hostproblem { margin-top: 8px; color: var(--warn); font-size: 12.5px; }
+      .hostproblem:empty { display: none; }
+      .hostcard { display: flex; align-items: center; gap: 14px; padding: 12px 14px; border-radius: 14px; background: var(--panel); border: 1px solid var(--line); }
       .hostcard .what { flex: 1; min-width: 0; }
       .hostcard .title { font-weight: 600; }
       .hostcard .sub { color: var(--muted); font-size: 12.5px; }
@@ -100,13 +105,26 @@
         <div class="error" id="error"></div>
       </section>
 
-      <div class="hostcard">
-        <div class="what">
-          <div class="title">Host a session on this Mac</div>
-          <div class="sub" id="hostsub">Pick a project, then run the session here and open the big screen.</div>
+      <section class="hosting">
+        <h2>Host a session on this Mac</h2>
+        <div class="hostcards" id="modes">
+          <div class="hostcard" id="mode-here">
+            <div class="what">
+              <div class="title">Host and work here</div>
+              <div class="sub">The big screen on the room display, plus your own JamSesh window.</div>
+            </div>
+            <button class="btn" id="host-here">Host</button>
+          </div>
+          <div class="hostcard" id="mode-room">
+            <div class="what">
+              <div class="title">Host the room only</div>
+              <div class="sub">The big screen on every display and no personal window. For a Mac nobody uses.</div>
+            </div>
+            <button class="btn" id="host-room">Host</button>
+          </div>
         </div>
-        <button class="btn" id="host">Host</button>
-      </div>
+        <div class="sub hostproblem" id="hostsub"></div>
+      </section>
     </main>
     <div class="busy" id="busy">
       <div class="busy-box">
@@ -281,13 +299,19 @@
         look();
       }
       $("scanstop").onclick = () => (stopScan(), $("addr").focus());
-      $("host").onclick = () => run("Starting the session…", () => invoke("host_here"));
+      $("host-here").onclick = () => run("Starting the session…", () => invoke("host_here", { roomOnly: false }));
+      $("host-room").onclick = () => run("Starting the session…", () => invoke("host_here", { roomOnly: true }));
 
       (async () => {
         info = await invoke("start_info");
         if (info.resumeError) $("error").textContent = `Couldn't rejoin ${info.lastHostName || "your last session"}: ${info.resumeError}`;
+        // The way this Mac hosted last comes first, as the main button.
+        const room = !!info.roomOnly;
+        $("modes").prepend($(room ? "mode-room" : "mode-here"));
+        $(room ? "host-room" : "host-here").classList.add("primary");
         if (!info.canHost) {
-          $("host").disabled = true;
+          $("host-here").disabled = true;
+          $("host-room").disabled = true;
           $("hostsub").textContent = info.hostProblem;
         }
         render();
