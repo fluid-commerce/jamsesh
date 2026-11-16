@@ -96,7 +96,7 @@ export function Stage({ state, interactive, tilePins = true, bar, asPerson, driv
             <ExpandCtx.Provider value={interactive ? expand : null}>{zoomed ? <Expanded tiles={tiles} open={zoomed} onPick={expand.expand} /> : body}</ExpandCtx.Provider>
           </TilePins.Provider>
         </div>
-        <DriveLayer screen={screen} replay={drive === "replay"} />
+        <DriveLayer screen={screen} replay={drive === "replay"} ownWindow={drive === "trackpad"} />
         {drive === "trackpad" && <Trackpad screen={screen} />}
       </div>
     </div>

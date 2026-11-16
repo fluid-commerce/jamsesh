@@ -21,6 +21,7 @@ import { Attachments, pdfText, type AttachmentRef } from "./attachments";
 import { seedFromProject } from "./carryover";
 import { readProjectContext } from "./carryover";
 import { projectsDir } from "./projects";
+import { earlierUploads, migratePhotos, PHOTO_URL } from "./photos";
 import { WikiService } from "./wiki/service";
 import { Auth } from "./auth";
 import { KeepAwake } from "./awake";
@@ -136,6 +137,8 @@ export class Hub {
     return Date.now() > this.deadline;
   }
   uploadsDir: string;
+  /** Profile photos: in the team folder, so they outlive sessions like the people they belong to. */
+  photosDir: string;
 
   /** Every helper process the hub starts; stop() walks it. */
   readonly helpers = new HelperRegistry();
@@ -286,6 +289,12 @@ export class Hub {
     }
     this.uploadsDir = join(this.canvas.rendersDir, "uploads");
     mkdirSync(this.uploadsDir, { recursive: true });
+    this.photosDir = join(teamDir, "photos");
+    try {
+      migratePhotos({ people: this.session.people(), photosDir: this.photosDir, uploads: earlierUploads(dir, config.home), setPhoto: (id, url) => void this.session.setPhoto(id, url) });
+    } catch (e) {
+      console.error("photos:", e instanceof Error ? e.message : e);
+    }
 
     this.audio.onLine = (u, isNew) => this.roomLine(u, isNew);
     this.session.voiceprints = () => {
@@ -1197,8 +1206,8 @@ export class Hub {
     const img = checkImage(bytes);
     if (typeof img === "string") throw new BadImage(img);
     const file = `${personId}-${Date.now()}.${img.kind === "jpeg" ? "jpg" : "png"}`;
-    await Bun.write(join(this.uploadsDir, file), bytes);
-    return this.session.setPhoto(personId, `/renders/uploads/${file}`);
+    await Bun.write(join(this.photosDir, file), bytes);
+    return this.session.setPhoto(personId, `${PHOTO_URL}${file}`);
   }
 
   /**

@@ -7,7 +7,7 @@
 // - Everything live (/api, /ws, /mcp, /canvas, /renders, /snapshots, scripts) goes straight
 //   to the network and is never cached.
 const VERSION = "jamsesh-shell-v1";
-const NETWORK_ONLY = /^\/(api|ws|mcp|canvas|renders|snapshots|join\.sh|hook\.sh|skill\.md|healthz|debug)(\/|$)/;
+const NETWORK_ONLY = /^\/(api|ws|mcp|canvas|renders|photos|snapshots|join\.sh|hook\.sh|skill\.md|healthz|debug)(\/|$)/;
 const SHELL = ["/index.html", "/manifest.webmanifest", "/favicon.svg", "/icons/icon.svg", "/icons/icon-192.png", "/icons/icon-512.png", "/icons/apple-touch-icon.png"];
 
 self.addEventListener("install", (event) => {

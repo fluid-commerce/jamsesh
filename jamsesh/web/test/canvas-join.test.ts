@@ -1,7 +1,7 @@
 // A person's canvas joins inside its iframe; the page reads how that's going and rejoins when it
 // fails, instead of leaving a blank document up.
 import { expect, test } from "bun:test";
-import { canvasSrc, friendlyReason, JoinWatch, RejoinTimer, joinLabel, joinStateOf, rejoinDelay } from "../src/shared/canvasJoin";
+import { canvasSrc, resolveCanvasLink,friendlyReason, JoinWatch, RejoinTimer, joinLabel, joinStateOf, rejoinDelay } from "../src/shared/canvasJoin";
 
 test("the join state comes from the canvas's own session", () => {
   expect(joinStateOf({ status: "live" })).toEqual({ state: "live" });
@@ -43,6 +43,12 @@ test("only a person's canvas asks for the panel buttons", () => {
   expect(canvasSrc({ link, name: "Big screen" })).toBe(`/canvas/?canvas&control&name=Big%20screen#join=${encodeURIComponent(link)}`);
   expect(canvasSrc({ link, name: "Dana", panels: true, webgl: true })).toBe(`/canvas/?canvas&control&webgl&panels&name=Dana#join=${encodeURIComponent(link)}`);
   expect(canvasSrc({ link })).not.toContain("panels");
+});
+
+test("a relative canvas link resolves at the address the page was loaded from; an absolute one is kept", () => {
+  expect(resolveCanvasLink("/collab/?file=f&token=t", { protocol: "http:", host: "127.0.0.1:4790" })).toBe("ws://127.0.0.1:4790/collab/?file=f&token=t");
+  expect(resolveCanvasLink("/collab/?file=f&token=t", { protocol: "https:", host: "jam.example.com" })).toBe("wss://jam.example.com/collab/?file=f&token=t");
+  expect(resolveCanvasLink("ws://192.168.2.18:4747/collab/?file=f&token=t", { protocol: "http:", host: "x" })).toBe("ws://192.168.2.18:4747/collab/?file=f&token=t");
 });
 
 test("a hung or failing collab.peers becomes a failed join, one read at a time", async () => {

@@ -9,7 +9,7 @@ import { isOpaqueFrame, pointerRecording } from "./pointer";
 import { registerDriveTarget } from "./driving";
 import { canvasDriver, frameDriver, keepFrameCurrent } from "./drivetiles";
 import { VersionBadge } from "./StageControls";
-import { CONNECT_TIMEOUT_MS, JoinWatch, RejoinTimer, canvasSrc, START_TIMEOUT_MS, friendlyReason, joinLabel, rejoinDelay, type JoinState } from "./canvasJoin";
+import { CONNECT_TIMEOUT_MS, JoinWatch, RejoinTimer, canvasSrc, resolveCanvasLink, START_TIMEOUT_MS, friendlyReason, joinLabel, rejoinDelay, type JoinState } from "./canvasJoin";
 import { loadFonts, newFontMemory } from "./roomFonts";
 import { askRoomForFonts, fetchRoomFace } from "./roomFontsApi";
 
@@ -1304,7 +1304,7 @@ function LiveCanvas({ kind, name, title, follow, page, panels }: CanvasFrameProp
     api<{ link: string | null; reason: string | null }>(`/canvas-link?kind=${kind}`)
       .then((r) => {
         if (gone) return;
-        if (r.link) (setLink(r.link), setLinkGen(gen), setErr(null));
+        if (r.link) (setLink(resolveCanvasLink(r.link)), setLinkGen(gen), setErr(null));
         else (setErr(r.reason ?? "The canvas isn't live yet."), failed());
       })
       .catch((e) => (setErr(String(e.message ?? e)), failed()));

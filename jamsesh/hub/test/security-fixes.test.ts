@@ -240,3 +240,17 @@ test("the canvas link (it carries the canvas token) is for a paired person or th
   expect((await get(hostWindow())).status).toBe(200);
   expect((await fetch(`${base}/api/canvas-link?kind=edit`, { method: "POST", headers: { ...remote, authorization: `Bearer ${person.token}` } })).status).toBeGreaterThanOrEqual(400);
 });
+
+test("the canvas link for a caller that isn't this computer is relative, so it resolves at the address that person used (the Mac app's relay adds their credential)", async () => {
+  hub.session.setCanvas({ status: "live", editLink: null, viewLink: null, wsEdit: "ws://192.168.2.18:4747/collab/?file=f1&token=EDIT", wsView: "ws://192.168.2.18:4747/collab/?file=f1&token=VIEW", reason: null });
+  const person = hub.auth.issue({ kind: "browser", label: "Mac", ip: "192.168.2.40", personId: chey.id });
+  // A relay on the LAN arrives with its own host header and a forwarded host the hub must not turn into a link.
+  const lan = { ...remote, host: "192.168.2.18:4747", "x-forwarded-host": "127.0.0.1:4790", authorization: `Bearer ${person.token}` };
+  const edit = await (await fetch(`${base}/api/canvas-link?kind=edit`, { headers: lan })).json();
+  expect(edit.link).toBe("/collab/?file=f1&token=EDIT");
+  expect((await (await fetch(`${base}/api/canvas-link?kind=view`, { headers: lan })).json()).link).toBe("/collab/?file=f1&token=VIEW");
+  expect(decodeURIComponent(edit.desktop)).toBe("figcraft://join?server=/collab/&file=f1&token=EDIT");
+  // The host's own window keeps an absolute address.
+  const own = await (await fetch(`${base}/api/canvas-link?kind=edit`, { headers: hostWindow() })).json();
+  expect(own.desktop).toContain("figcraft://join?server=ws");
+});

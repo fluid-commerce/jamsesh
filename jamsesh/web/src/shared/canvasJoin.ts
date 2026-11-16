@@ -27,6 +27,16 @@ export function joinStateOf(peers: any): JoinState {
 }
 
 /**
+ * A canvas join link as an absolute ws(s) address. A relative link ("/collab/?…") names the address this page was loaded
+ * from, so it reaches the host the way the page did (through the Mac app's relay, which adds the person's credential);
+ * an absolute link (an older hub) is used as it is.
+ */
+export function resolveCanvasLink(link: string, loc: { protocol: string; host: string } = location): string {
+  if (!link.startsWith("/") || link.startsWith("//")) return link;
+  return `${loc.protocol === "https:" ? "wss" : "ws"}://${loc.host}${link}`;
+}
+
+/**
  * The canvas page's address for a join link. `panels`: a person's canvas, with buttons in its
  * top corners for the layers and properties panels (the big screen leaves them out).
  */
