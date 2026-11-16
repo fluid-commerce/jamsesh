@@ -219,8 +219,8 @@ the client.
   voiceprint library, and the speaker-embedding model, so the host Mac needs nothing else [B29].
   Speech-to-text runs on the Mac with the bundled whisper-server; its model (574 MB) is downloaded
   on a Mac's first host session while the gateway covers the room (see [9.3](#93-transcription)).
-  The faster engine (Parakeet, on by default) downloads its model (740 MB) on the first host session
-  too, unless the room turned it off, while whisper or the gateway carry the room. The room
+  The opt-in faster engine (Parakeet) downloads its model (740 MB) only when the host turns it on,
+  while whisper or the gateway carry the room. The room
   sees a notice if no engine is available [B28a].
 - Advertises itself on the local network with Bonjour (`dns-sd -R <ComputerName> _jamsesh._tcp`,
   TXT `session=<name>` and `https=<public URL>` when remote access is on). The record carries no
@@ -1613,10 +1613,11 @@ Transcription mode is `auto`, `local`, or `gateway` (**Settings > Transcription*
 transcribes for everyone, desktop and browser alike, since every laptop's audio already comes to it.
 In `auto` the engines are tried least-busy first, then in this order [B28]:
 
-1. **Host Parakeet, the faster engine, the default.** On unless the room turns it off: **Settings >
-   Transcription > Faster engine (25 European languages, runs on the GPU, downloads 740 MB)**, the
-   `fastEngine` setting, host only, kept across sessions (unset means on; a room that turned it off
-   keeps it off). NVIDIA's Parakeet TDT 0.6B v3 (Q8_0 GGUF, CC-BY-4.0) through transcribe.cpp (the
+1. **Host Parakeet, when the faster engine is on.** Off by default: **Settings > Transcription >
+   Faster engine (less accurate than whisper; 25 European languages, runs on the GPU, downloads
+   740 MB)**, the `fastEngine` setting, host only, kept across sessions. Whisper stays the default
+   because it was more accurate in the bake-off (below and
+   [docs/transcription-bakeoff.md](docs/transcription-bakeoff.md)). NVIDIA's Parakeet TDT 0.6B v3 (Q8_0 GGUF, CC-BY-4.0) through transcribe.cpp (the
    `transcribe-cpp` npm package, MIT, pinned to an exact version), which runs it on the Mac's GPU
    with Metal on Apple silicon. The native library is Hex's fork of transcribe.cpp
    (`anomalyco/transcribe.cpp`, MIT: 0.4.1 with the same C ABI plus Parakeet vocabulary rescoring).
@@ -1637,7 +1638,8 @@ In `auto` the engines are tried least-busy first, then in this order [B28]:
    doesn't start, **Settings** says why, and whisper carries the room. The app bundles
    `transcribe-cpp`, its FFI library koffi and the darwin-arm64 package beside sherpa-onnx (which
    stays for voiceprints); the compiled hub finds them in its bundled `node_modules`, and the release
-   build checks the fork's library is the one loaded (`jamsesh-hub --stt-check`). Under Bun a
+   build checks the binding and the fork's library load (`jamsesh-hub --stt-check`; it loads no model
+   and decodes no audio, so it says nothing about accuracy, which the bake-off measures). Under Bun a
    garbage-collected koffi type aborts the process, so the hub makes each word-list array type once
    and keeps it. A child that doesn't say it's listening within 90 seconds is stopped. On the first host session it downloads the model once (one
    GGUF file from Hugging Face, `handy-computer/parakeet-tdt-0.6b-v3-gguf` at a fixed revision,
@@ -1658,7 +1660,7 @@ In `auto` the engines are tried least-busy first, then in this order [B28]:
    (0.05 s and 0.08 s with the room's words, which rescoring costs only when a span looks like one of
    them; `hub/test/parakeet-engines.bench.ts`), against 0.09 s and 0.20 s for the v2 int8 model on the
    CPU it replaced, and 0.26 s and 0.29 s for whisper.
-2. **Host whisper.cpp, the fallback and the engine for other languages** (`whisper-server` on `127.0.0.1:8178`, or
+2. **Host whisper.cpp, the default** (`whisper-server` on `127.0.0.1:8178`, or
    `JAMSESH_WHISPER_PORT`). A server already answering there is used only if it transcribes half a
    second of silence like whisper-server (a `text` in JSON), and is never stopped by the hub; anything
    else on the port is left alone and **Settings** says the port is taken. The hub's own
@@ -1692,8 +1694,13 @@ In `auto` the engines are tried least-busy first, then in this order [B28]:
    In the synthetic bake-off
    ([docs/transcription-bakeoff.md](docs/transcription-bakeoff.md)) it had the lowest word error
    with the vocabulary prompt and the correction pass, in any language, and without inventing the
-   room's words on silence; that bake-off ran Parakeet v2 on the CPU, and the default moved to
-   Parakeet v3 on the GPU for its speed.
+   room's words on silence. Rerun through the shipped path against Parakeet v3 on the GPU with the
+   fork's rescoring (77 synthetic clips: room lines clean, noisy, with a second voice and with echo,
+   look-alike words, repeated words, eight other languages, no speech;
+   `hub/test/transcription-bakeoff.bench.ts`), whisper had 6.2% word error, 93% of the room's words
+   and 2 false insertions; Parakeet v3 had 10.3%, 81% and 2, at about a third of the time per clip.
+   The rule for making Parakeet the default (word error within a point of whisper's, at least its
+   recall, no more false insertions) wasn't met, so it stays opt-in.
 3. **Client workers.** A JamSesh for Mac client with whisper.cpp offers itself as a transcription
    worker to the host, which uses it when the host is busy [B28b].
 4. **The gateway** (`openai/gpt-transcribe`), the fallback.
@@ -2888,10 +2895,10 @@ it.
 
 JamSesh uses the computers in the room [B28]:
 
-- **Host:** speech-to-text (Parakeet on the GPU through transcribe.cpp, the default, and the bundled
-  whisper.cpp) and speaker embeddings (sherpa-onnx) run locally [B28a]. The speaker model ships with
-  the app; whisper's and Parakeet's models are downloaded on the first host session (Parakeet's
-  unless the room turned the faster engine off; see [9.3](#93-transcription)). Until a local engine runs, speech goes through the gateway.
+- **Host:** speech-to-text (the bundled whisper.cpp, or Parakeet on the GPU when the faster engine
+  is on) and speaker embeddings (sherpa-onnx) run locally [B28a]. The speaker model ships with the
+  app; whisper's model is downloaded on the first host session and Parakeet's when the host turns
+  the faster engine on (see [9.3](#93-transcription)). Until a local engine runs, speech goes through the gateway.
 - **Clients:** a JamSesh for Mac client with spare capacity runs whisper.cpp and offers itself to
   the host as a transcription worker (`POST /api/workers`) [B28b].
 - **Brain:** the brain's language models run on the gateway, where the best model for each job is

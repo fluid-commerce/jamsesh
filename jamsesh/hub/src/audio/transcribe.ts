@@ -1,5 +1,5 @@
-// Speech to text. Order: Parakeet on the host (the faster engine, 5.2: on unless the room turns it off),
-// local whisper.cpp (the fallback, and the engine for other languages), whisper servers that client machines offer, then the gateway. A pool spreads work across whoever is free. Every engine is
+// Speech to text. Order: Parakeet on the host when the room turned on the faster engine (5.2),
+// local whisper.cpp (the default), whisper servers that client machines offer, then the gateway. A pool spreads work across whoever is free. Every engine is
 // biased toward the room's vocabulary, and its text goes through the same correction pass.
 import { HelperRegistry } from "../children";
 import { transcribe as aiTranscribe } from "ai";
@@ -132,7 +132,7 @@ export class Transcriber {
   private fastGen = 0;
   private startingGen = -1;
   /**
-   * Starts or stops Parakeet to match the "Faster engine" setting (on by default). Turning it on
+   * Starts or stops Parakeet to match the "Faster engine" setting (off by default). Turning it on
    * downloads the model the first time (minutes, never offline) while whisper or the gateway carry
    * the room; once it's ready it goes first. Resolves with whether it's running. Off then on while it
    * was starting: the stopped start winds down first, then it starts again.

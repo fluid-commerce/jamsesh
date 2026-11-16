@@ -259,7 +259,7 @@ test("people's words reach the vocabulary through Settings; agents can't change 
   expect(JSON.stringify(engines.speechModel)).not.toContain(config.home);
 });
 
-// ---- the faster engine is on by default ----
+// ---- the faster engine is opt-in (whisper won the bake-off) ----
 
 /** Fetch that answers the model download itself and passes everything else through. */
 function interceptDownload(answer: () => Response) {
@@ -269,15 +269,27 @@ function interceptDownload(answer: () => Response) {
   return { asked, restore: () => (globalThis.fetch = real) };
 }
 
-test("by default the faster engine is on: online it downloads the pinned model while whisper carries the room", () => online(async () => {
+test("by default whisper is the engine: nothing is downloaded and the faster engine says it's off", () => online(async () => {
   const hub = room();
+  const net = interceptDownload(() => new Response("never", { status: 500 }));
+  try {
+    expect(hub.session.settings().fastEngine).toBe(false);
+    expect(await hub.transcriber.syncFastEngine()).toBe(false);
+    expect(net.asked).toEqual([]);
+    expect(hub.transcriber.parakeet.status()).toMatchObject({ state: "off", progress: null });
+  } finally {
+    net.restore();
+  }
+}));
+
+test("turned on and online, it downloads the pinned model while whisper carries the room", () => online(async () => {
+  const hub = room();
+  hub.session.updateSettings({ fastEngine: true });
   const net = interceptDownload(() => new Response("gone", { status: 404 }));
   try {
-    expect(hub.session.settings().fastEngine).toBe(true);
     expect(await hub.transcriber.syncFastEngine()).toBe(false);
     expect(net.asked).toEqual([PARAKEET.url]);
     expect(hub.transcriber.parakeet.status()).toMatchObject({ state: "failed", detail: "Couldn't download the speech model: HTTP 404." });
-    // Meanwhile (and when it fails) whisper takes the lines.
     hub.transcriber.addWorker("laptop", "whisper", fakeEngine("Shay is here").url);
     expect(await hub.transcriber.transcribe(clip, 2)).toEqual({ text: "Chey is here", engine: "whisper" });
   } finally {
@@ -285,12 +297,12 @@ test("by default the faster engine is on: online it downloads the pinned model w
   }
 }));
 
-test("offline, the default-on engine downloads nothing: it says the model is missing and whisper carries the room", async () => {
+test("offline, a room that turned it on downloads nothing: it says the model is missing and whisper carries the room", async () => {
   const hub = room();
+  hub.session.updateSettings({ fastEngine: true });
   const net = interceptDownload(() => new Response("never", { status: 500 }));
   try {
     expect(config.offline).toBe(true);
-    expect(hub.session.settings().fastEngine).toBe(true);
     expect(await hub.transcriber.syncFastEngine()).toBe(false);
     expect(net.asked).toEqual([]);
     expect(hub.transcriber.parakeet.status()).toMatchObject({ state: "missing", installed: false, progress: null });
