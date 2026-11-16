@@ -703,6 +703,23 @@ textarea:focus {
   color: var(--dim);
 }
 
+.suggest-chip {
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  background: transparent;
+  color: var(--dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.suggest-chip:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+}
+
 /* ---------- popover ---------- */
 
 .popover {

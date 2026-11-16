@@ -22,12 +22,16 @@ export type SpeechSource = "voice" | "recorded" | "typed" | "ambient";
 export type SpeechKind = "answer" | "problem" | "confirm" | "request";
 
 let lastSpokeAt = 0;
+/** What the brain said in the last half minute: the audio pipeline drops a transcript that is one of these coming back through a mic. */
+export const recentReplies: { text: string; at: number }[] = [];
+const REPLY_KEEP_MS = 30_000;
 let lastFallbackToastAt = 0;
 
 /** Forgets when the brain last spoke and last said it fell back (tests share this process). */
 export function resetSpeechState() {
   lastSpokeAt = 0;
   lastFallbackToastAt = 0;
+  recentReplies.length = 0;
 }
 
 /** Voices the OpenAI speech models offer; other providers name theirs differently. */
@@ -112,6 +116,8 @@ export async function speak(session: Session, text: string, opts: { source?: Spe
   const s = session.settings();
   const source = opts.source ?? "voice";
   const kind = opts.kind ?? "answer";
+  while (recentReplies.length && Date.now() - recentReplies[0].at > REPLY_KEEP_MS) recentReplies.shift();
+  recentReplies.push({ text, at: Date.now() });
   // Requests wait out the gap after the last reply instead of being dropped to text.
   if (kind === "request" && s.voiceReplies) {
     const wait = 4000 - (Date.now() - lastSpokeAt);

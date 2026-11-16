@@ -633,6 +633,8 @@ export interface Utterance {
   personId: string | null;
   speakerName: string;
   confidence: number;
+  /** Who it probably was, when too unsure to name them (personId is then null): one tap on the line assigns it. */
+  suggestedPersonId?: string | null;
   method: string;
   deviceId: string;
   devices: { deviceId: string; level: number; snr: number }[];
