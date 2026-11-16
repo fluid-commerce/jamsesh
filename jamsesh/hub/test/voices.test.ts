@@ -92,16 +92,17 @@ for (const c of SKEWS)
     expect(ofRoom(room)).toHaveLength(lines.length);
   }, T);
 
-// A far laptop that mishears a word is transcribed too (its copy is within 10 dB of the best, 5.R6) and its words
-// differ, so it is its own line: the design's known limit. What the room said is still all there, once in full.
-sim("a far laptop that mishears a word shows as a second line, and every line is still shown in full", async () => {
+// A far laptop that mishears a word is transcribed too (its copy is within 10 dB of the best, 5.R6). Its words nearly
+// match and it overlaps the line in time, so it merges into that line (Nov 16: one sentence on two mics is one line).
+// What the room said is still all there, once in full.
+sim("a far laptop that mishears a word merges into the line, and every line is still shown in full", async () => {
   const room = makeRoom();
   const lines = script(21, 3, base()).slice(0, 12);
   const r = rng(5);
   for (const l of lines) await play(room, l, r, { textNoise: true });
   const s = score(room, lines);
   expect(s.lost).toBe(0);
-  expect(s.dupes).toBeGreaterThan(0);
+  expect(s.dupes).toBe(0);
   const shown = ofRoom(room).map((u) => u.text);
   for (const l of lines) expect(shown).toContain(l.text);
 }, T);

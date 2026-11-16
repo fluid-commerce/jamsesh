@@ -134,8 +134,10 @@ const LOUDEST_FRAME_MS = 200;
 const TWIN_MS = 3000;
 /** Copies of one voice on two microphones compare at 0.7 to 0.9; two voices saying the same words, about 0.4 to 0.55. */
 const SAME_VOICE = 0.6;
-/** Below this confidence a line is "Someone" with a suggestion, not a name. */
+/** Below this confidence a line named only by which laptop heard it is "Someone" with a suggestion, not a name. */
 const SURE = 0.55;
+/** A line the speaker's voice also points to is named as before (from 0.3): a voice match scores lower when other enrolled voices are close, and is still right. */
+const VOICE_SURE = 0.3;
 /** A device owner's head start needs their mic clearly the loudest; closer than this it can't name anyone alone. */
 const CLEAR_LEAD_DB = 6;
 /** How long a spoken reply can come back through a mic. */
@@ -1053,7 +1055,8 @@ export class AudioPipeline {
 
 /** Who a guess may name: only a sure one. A less sure one leaves the line to "Someone" and is kept as a suggestion. */
 function attribute(guess: SpeakerGuess): { personId: string | null; suggestedPersonId: string | null } {
-  if (guess.personId && guess.confidence >= SURE) return { personId: guess.personId, suggestedPersonId: null };
+  const sure = guess.method.startsWith("voice") ? VOICE_SURE : SURE;
+  if (guess.personId && guess.confidence >= sure) return { personId: guess.personId, suggestedPersonId: null };
   return { personId: null, suggestedPersonId: guess.personId };
 }
 
