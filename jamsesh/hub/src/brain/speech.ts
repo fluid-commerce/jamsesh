@@ -61,6 +61,11 @@ export async function synthesize(session: Session, text: string, voice?: string)
 }
 
 /**
+ * The rule: JamSesh talks out loud only in answer to something said out loud. A click, a typed
+ * message, an agent's tool call, a timer or a system event is answered on screen, never spoken.
+ * (The one exception is kind "request": an agent asking the room for an approval nobody may be
+ * looking at.)
+ *
  * Pure decision, exported for tests. Spoken requests get spoken answers, problems and a few-word
  * confirmation ("Sent to Felipe's agent"); typed and overheard lines get text only.
  */

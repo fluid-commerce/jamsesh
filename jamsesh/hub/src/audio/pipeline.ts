@@ -943,25 +943,24 @@ export class AudioPipeline {
   }
 
   /**
-   * Someone says who said a line. The line is relabelled whoever says so. Its voice joins that person's
-   * voiceprint (counted as a correction) only when the one correcting is that person or the host; what the
-   * wrong label taught the wrong person is taken back only when they or the host correct it. Anyone else's
-   * correction relabels the line and teaches nothing, so nobody can write or erase another person's voice.
+   * Someone says who said a line. Any person in the room (a paired person's window or the host window;
+   * an agent's credential never gets here) can relabel any line. Its voice joins the new person's voiceprint
+   * (counted as a correction) and what the wrong label taught the previous person is taken back. Only a
+   * caller who is nobody in particular (a window that hasn't said who is using it) teaches nothing.
    */
   assign(utteranceId: string, personId: string, by: Corrector): { utterance: Utterance; learning: Learning } {
     const u = this.session.store.get("utterances", utteranceId);
     const person = this.session.person(personId);
     if (!u || !person) throw new Error("Unknown line or person");
     const prior = u.personId && u.personId !== personId ? u.personId : null;
-    const mayTeach = by.host || by.personId === personId;
-    const mayUnteach = !!prior && (by.host || by.personId === prior);
+    const mayTeach = by.host || !!by.personId;
     const heard = this.voiceOf(u);
     let learning: Learning;
     if (!voiceprintStatus().available) learning = { learned: false, reason: "voice matching is off on this host" };
     else if (!heard.embedding) learning = { learned: false, reason: heard.reason };
     else {
-      const cleaned = mayUnteach ? (this.voiceprints.remove(prior!, heard.embedding), this.voiceprints.forgetLike(prior!, heard.embedding)) : 0;
-      if (!mayTeach) learning = { learned: false, reason: `only ${person.name} or the host can teach ${person.name}'s voice` };
+      const cleaned = prior && mayTeach ? (this.voiceprints.remove(prior, heard.embedding), this.voiceprints.forgetLike(prior, heard.embedding)) : 0;
+      if (!mayTeach) learning = { learned: false, reason: "this window doesn't know who is using it" };
       else if (!this.voiceprints.add(personId, heard.embedding, "correction", heard.heardAt)) learning = { learned: false, reason: `that line was heard before ${person.name}'s voice was reset` };
       else learning = { learned: true, cleaned, relabelled: this.relabelSimilar(heard.embedding, personId, u.id) };
     }

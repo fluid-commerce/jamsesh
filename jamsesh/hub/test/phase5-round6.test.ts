@@ -49,34 +49,39 @@ const count = (id: string) => hub.audio.voiceprints.count(id);
 
 const voiced = test.skipIf(!voiceprintStatus().available);
 
-voiced("someone else's correction relabels only: the new label learns nothing and the old one keeps its sample", () => {
+voiced("anyone's correction teaches the new person and takes the sample back from the old one", () => {
   const [ana, bob, cam] = people("1");
   const { id } = taughtLine(ana.id, 1);
-  const before = count(ana.id);
   const r = hub.audio.assign(id, cam.id, { host: false, personId: bob.id });
   expect(r.utterance).toMatchObject({ personId: cam.id, method: "manual" });
-  expect(r.learning).toMatchObject({ learned: false });
-  expect((r.learning as { reason: string }).reason).toContain(`only ${cam.name} or the host`);
-  expect(count(cam.id)).toBe(0);
-  expect(count(ana.id)).toBe(before);
+  expect(r.learning).toMatchObject({ learned: true });
+  expect(count(cam.id)).toBeGreaterThan(0);
+  expect(count(ana.id)).toBe(0);
 });
 
-voiced("the person named teaches their own voice, but can't take a sample back from the one wrongly labelled", () => {
+voiced("the person named teaches their own voice and takes it back from the one wrongly labelled", () => {
   const [ana, , cam] = people("2");
   const { id } = taughtLine(ana.id, 2);
-  const before = count(ana.id);
-  expect(hub.audio.assign(id, cam.id, { host: false, personId: cam.id }).learning).toMatchObject({ learned: true, cleaned: 0 });
+  expect(hub.audio.assign(id, cam.id, { host: false, personId: cam.id }).learning).toMatchObject({ learned: true });
   expect(count(cam.id)).toBeGreaterThan(0);
-  expect(count(ana.id)).toBe(before);
+  expect(count(ana.id)).toBe(0);
 });
 
-voiced("the person wrongly labelled takes their sample back, without teaching the person they name", () => {
+voiced("the person wrongly labelled can correct it too", () => {
   const [ana, , cam] = people("3");
   const { id } = taughtLine(ana.id, 3);
-  const r = hub.audio.assign(id, cam.id, { host: false, personId: ana.id });
-  expect(r.learning).toMatchObject({ learned: false });
+  expect(hub.audio.assign(id, cam.id, { host: false, personId: ana.id }).learning).toMatchObject({ learned: true });
   expect(count(ana.id)).toBe(0);
+  expect(count(cam.id)).toBeGreaterThan(0);
+});
+
+voiced("a caller who is nobody in particular relabels and teaches nothing", () => {
+  const [ana, , cam] = people("7");
+  const { id } = taughtLine(ana.id, 9);
+  const before = count(ana.id);
+  expect(hub.audio.assign(id, cam.id, { host: false, personId: null }).learning).toMatchObject({ learned: false });
   expect(count(cam.id)).toBe(0);
+  expect(count(ana.id)).toBe(before);
 });
 
 voiced("the host's correction does both", () => {
@@ -97,27 +102,23 @@ voiced("a relabel said aloud to the brain relabels the line and changes no voice
   expect(count(ana.id)).toBe(before);
 });
 
-voiced("over HTTP: another paired browser relabels only; the named person's own browser and the host's window teach", async () => {
+voiced("over HTTP: another paired browser's relabel teaches the new person, and so does the host's window", async () => {
   const [ana, bob, cam] = people("6");
   const bobs = hub.auth.issue({ kind: "browser", label: "Bob's laptop", ip: "10.0.0.31" });
-  const cams = hub.auth.issue({ kind: "browser", label: "Cam's laptop", ip: "10.0.0.32" });
   expect((await call(bobs.token, "POST", "/devices", { deviceId: "d-bob6", personId: bob.id })).status).toBe(200);
-  expect((await call(cams.token, "POST", "/devices", { deviceId: "d-cam6", personId: cam.id })).status).toBe(200);
   const first = taughtLine(ana.id, 6);
-  const anaBefore = count(ana.id);
   const r = await call(bobs.token, "POST", `/utterances/${first.id}/assign`, { personId: cam.id });
   expect(r.status).toBe(200);
-  expect(await r.json()).toMatchObject({ personId: cam.id, learning: { learned: false } });
-  expect([count(cam.id), count(ana.id)]).toEqual([0, anaBefore]);
-  // Naming a new person by name from someone else's laptop teaches them nothing either.
-  const named = await (await call(bobs.token, "POST", `/utterances/${first.id}/assign`, { name: "Dee 6" })).json();
-  expect(named.learning).toMatchObject({ learned: false });
-  expect(count(named.personId)).toBe(0);
-
-  expect(await (await call(cams.token, "POST", `/utterances/${first.id}/assign`, { personId: cam.id })).json()).toMatchObject({ learning: { learned: true } });
+  expect(await r.json()).toMatchObject({ personId: cam.id, learning: { learned: true } });
   expect(count(cam.id)).toBeGreaterThan(0);
+  expect(count(ana.id)).toBe(0);
+  // Naming a new person by name from someone else's laptop teaches them too.
   const second = taughtLine(ana.id, 7);
-  expect(await (await asHostWindow("POST", `/utterances/${second.id}/assign`, { personId: bob.id })).json()).toMatchObject({ personId: bob.id, learning: { learned: true } });
+  const named = await (await call(bobs.token, "POST", `/utterances/${second.id}/assign`, { name: "Dee 6" })).json();
+  expect(named.learning).toMatchObject({ learned: true });
+  expect(count(named.personId)).toBeGreaterThan(0);
+  const third = taughtLine(ana.id, 8);
+  expect(await (await asHostWindow("POST", `/utterances/${third.id}/assign`, { personId: bob.id })).json()).toMatchObject({ personId: bob.id, learning: { learned: true } });
   expect(count(bob.id)).toBeGreaterThan(0);
 });
 

@@ -103,7 +103,8 @@ export class Brain {
     const oldest = Math.floor((now - waiting[0].ts) / 60_000);
     const tasks = waiting.filter((c) => c.type === "task").length;
     const what = tasks === waiting.length ? "task" : tasks === 0 ? "context item" : "item";
-    void speak(s, `${waiting.length === 1 ? `One ${what} has` : `${waiting.length} ${what}s have`} been waiting in triage, the oldest for ${oldest} minutes.`, { source: "voice", kind: "problem" });
+    // A timer, not something someone said: on screen only.
+    void speak(s, `${waiting.length === 1 ? `One ${what} has` : `${waiting.length} ${what}s have`} been waiting in triage, the oldest for ${oldest} minutes.`, { source: "ambient", kind: "problem" });
     return true;
   }
 
