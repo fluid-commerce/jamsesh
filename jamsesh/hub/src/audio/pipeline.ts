@@ -13,6 +13,8 @@ import { bus } from "../bus";
 import { newId } from "../store";
 import type { Session } from "../session";
 import type { Utterance } from "../types";
+import { quotesReply, sameWords } from "../similarity";
+import { recentReplies } from "../brain/speech";
 import type { Transcriber } from "./transcribe";
 import { ENROL_GRACE_MS, ENROL_WINDOW_MS, scriptShare } from "./enrol";
 import { cosine, embed, MIN_VOICE_SECONDS, normalize, voiceprintStatus, Voiceprints, type Learning } from "./voiceprint";
@@ -132,6 +134,12 @@ const LOUDEST_FRAME_MS = 200;
 const TWIN_MS = 3000;
 /** Copies of one voice on two microphones compare at 0.7 to 0.9; two voices saying the same words, about 0.4 to 0.55. */
 const SAME_VOICE = 0.6;
+/** Below this confidence a line is "Someone" with a suggestion, not a name. */
+const SURE = 0.55;
+/** A device owner's head start needs their mic clearly the loudest; closer than this it can't name anyone alone. */
+const CLEAR_LEAD_DB = 6;
+/** How long a spoken reply can come back through a mic. */
+const REPLY_ECHO_MS = 30_000;
 /** An unnamed line is the corrected voice's when it sounds this much like it, among the last few dozen. */
 const RELABEL_SIM = 0.75;
 const RELABEL_LOOKBACK = 60;
@@ -418,14 +426,32 @@ export class AudioPipeline {
    * don't agree one by one with the best copy's come back in sets that say the same words.
    */
   private async differing(g: Group, best: Segment, text: string): Promise<Segment[][]> {
-    const words = plainText(text);
     const sets = new Map<string, Segment[]>();
     for (const s of g.segments) {
       if (s === best || !couldDiffer(s, best, g.segments)) continue;
       const theirs = plainText((await this.words(s)).text);
-      if (theirs && theirs !== words) sets.set(theirs, [...(sets.get(theirs) ?? []), s]);
+      if (theirs && !this.sameLine(theirs, text, s, best)) sets.set(theirs, [...(sets.get(theirs) ?? []), s]);
     }
     return [...sets.values()];
+  }
+
+  /**
+   * Whether two copies that overlap in time say the same thing: the same words, or one cut short or with a word
+   * heard differently (sameWords). The fuzzy match also needs the voices to agree when both copies have one, so a
+   * short "Yes" from someone else over a sentence is still its own line.
+   */
+  private sameLine(a: string, b: string, x: Segment, y: Segment) {
+    if (plainText(a) === plainText(b)) return true;
+    if (!sameWords(a, b)) return false;
+    if (x.embedding === undefined) x.embedding = embed(x.pcm);
+    if (y.embedding === undefined) y.embedding = embed(y.pcm);
+    return !x.embedding || !y.embedding || cosine(x.embedding, y.embedding) >= SAME_VOICE;
+  }
+
+  /** Whether a transcript is something the brain said out loud in the last half minute, heard again through a mic. */
+  private isOwnReply(text: string) {
+    const now = Date.now();
+    return recentReplies.some((r) => now - r.at <= REPLY_ECHO_MS && quotesReply(text, r.text));
   }
 
   private without(g: Group, gone: Segment[]) {
@@ -456,15 +482,19 @@ export class AudioPipeline {
     if (!text) return false;
     // Someone reading the join sentence: every laptop hears it, and none of it belongs in the transcript.
     if (this.isCalibration(text, g)) return false;
+    // The brain's own spoken reply coming back through the room's mics is not a person talking.
+    if (this.isOwnReply(text)) return false;
     // From here to the line being stored nothing awaits: two groups finishing together can't both miss each other.
     if (this.mergeTwin(g, text, best)) return false;
-    const person = this.session.person(guess.personId);
+    const { personId, suggestedPersonId } = attribute(guess);
+    const person = this.session.person(personId);
     const u: Utterance = {
       id: g.previewId ?? newId("utt"),
       t0: g.t0,
       t1: g.t1,
       text,
-      personId: guess.personId,
+      personId,
+      suggestedPersonId,
       speakerName: person?.name ?? "Someone",
       confidence: guess.confidence,
       method: guess.method,
@@ -482,7 +512,7 @@ export class AudioPipeline {
     // The early line stays until the settled one is out: anything that fails on the way takes it back (emit's catch).
     this.stats.lines++;
     if (guess.method.startsWith("voice")) this.stats.voice++;
-    if (!guess.personId) this.stats.someone++;
+    if (!personId) this.stats.someone++;
     if (!g.split) this.autoEnroll(guess, best, g.segments);
     this.session.store.put("utterances", u);
     this.onLine?.(u, true);
@@ -522,15 +552,18 @@ export class AudioPipeline {
    */
   private earlyLine(g: Group, seg: Segment, heard: { text: string; engine: string }): Utterance | undefined {
     const { text, engine } = heard;
-    if (!text || this.recordingActive() || this.isCalibration(text, g)) return undefined;
+    if (!text || this.recordingActive() || this.isCalibration(text, g) || this.isOwnReply(text)) return undefined;
     const guess = this.identify([seg], seg, !g.split);
+    // Named on the same terms as the settled line, so an unsure early line doesn't show a name the settled one takes away.
+    const { personId, suggestedPersonId } = attribute(guess);
     const u: Utterance = {
       id: newId("utt"),
       t0: seg.t0,
       t1: seg.t1,
       text,
-      personId: guess.personId,
-      speakerName: this.session.person(guess.personId)?.name ?? "Someone",
+      personId,
+      suggestedPersonId,
+      speakerName: this.session.person(personId)?.name ?? "Someone",
       confidence: guess.confidence,
       method: guess.method,
       deviceId: seg.deviceId,
@@ -657,7 +690,9 @@ export class AudioPipeline {
     const lines = early ? [...this.session.store.all("utterances"), ...this.session.previews.values()] : this.session.store.all("utterances");
     // The nearest in time of every line that qualifies, voices included: a nearer one in another voice doesn't hide it.
     const twin = lines
-      .filter((x) => x.location === g.location && x.id !== g.utteranceId && x.id !== g.previewId && Math.abs(x.t0 - g.t0) < TWIN_MS && Math.abs(x.t1 - g.t1) < TWIN_MS + 1500 && !x.devices.some((d) => mine.has(d.deviceId)) && plainText(x.text) === words)
+      .filter((x) => x.location === g.location && x.id !== g.utteranceId && x.id !== g.previewId && Math.abs(x.t0 - g.t0) < TWIN_MS && Math.abs(x.t1 - g.t1) < TWIN_MS + 1500 && !x.devices.some((d) => mine.has(d.deviceId)))
+      // Exact words as before; a cut-short or slightly different copy also has to overlap the line in time.
+      .filter((x) => plainText(x.text) === words || (sameUtterance(x, g) && sameWords(x.text, text)))
       .filter((x) => {
         const theirs = this.voiceOf(x).embedding;
         return !best.embedding || !theirs || cosine(best.embedding, theirs) >= SAME_VOICE;
@@ -747,7 +782,7 @@ export class AudioPipeline {
       if (!couldDiffer(late, current, g.segments)) return;
       const before = current.heard ? plainText((await current.heard).text) : "";
       const theirs = plainText((await this.words(late)).text);
-      if (theirs && theirs !== before) {
+      if (theirs && !this.sameLine(theirs, before, late, current)) {
         this.without(g, [late]);
         this.emitApart(g, [late]);
       }
@@ -758,7 +793,7 @@ export class AudioPipeline {
     if (late === best || (current && couldDiffer(late, current, g.segments))) {
       const r = await this.words(late);
       const theirs = plainText(r.text);
-      if (theirs && theirs !== plainText(u.text)) {
+      if (theirs && !this.sameLine(theirs, u.text, late, current ?? best)) {
         this.without(g, [late]);
         this.emitApart(g, [late]);
         return;
@@ -767,6 +802,9 @@ export class AudioPipeline {
       if (theirs && late === best && current && late.snr > current.snr + 6) {
         ((text = r.text), (engine = r.engine));
         g.finalizedWith = late.id;
+      } else if (theirs && theirs.split(" ").length > plainText(u.text).split(" ").length) {
+        // The line was a cut-short copy of this one: the longer wording is the line's.
+        ((text = r.text), (engine = r.engine));
       }
     }
     const guess = this.identify(g.segments, best, !g.split);
@@ -775,19 +813,21 @@ export class AudioPipeline {
     const fresh = this.session.store.get("utterances", u.id) ?? u;
     if (g.adopted) return this.addDevices(fresh, g.segments);
     const manual = fresh.method === "manual";
-    const person = manual ? this.session.person(fresh.personId) : this.session.person(guess.personId);
+    const named = attribute(guess);
+    const person = manual ? this.session.person(fresh.personId) : this.session.person(named.personId);
     const next: Utterance = {
       ...fresh,
       text,
       engine,
-      personId: manual ? fresh.personId : guess.personId,
+      personId: manual ? fresh.personId : named.personId,
+      suggestedPersonId: manual ? null : named.suggestedPersonId,
       speakerName: person?.name ?? "Someone",
       confidence: manual ? 1 : guess.confidence,
       method: manual ? "manual" : guess.method + "+late",
       deviceId: best.deviceId,
       devices: g.segments.map((s) => ({ deviceId: s.deviceId, level: round(s.levelDb), snr: round(s.snr) })),
     };
-    if (next.text !== fresh.text || next.personId !== fresh.personId || next.devices.length !== fresh.devices.length) {
+    if (next.text !== fresh.text || next.personId !== fresh.personId || next.suggestedPersonId !== fresh.suggestedPersonId || next.devices.length !== fresh.devices.length) {
       this.session.store.put("utterances", next);
       this.onLine?.(next, false);
       bus.send({ type: "utterance", utterance: next });
@@ -810,7 +850,9 @@ export class AudioPipeline {
     for (const seg of byDevice ? byLevel : []) {
       const owner = s.store.get("devices", seg.deviceId)?.personId;
       if (!owner || deviceScores.has(owner)) continue;
-      const rel = seg === loud ? 0.55 + Math.min(Math.max(margin, 0), 12) / 26 : Math.max(0, 0.35 - (speechDb(loud) - speechDb(seg)) / 30);
+      // The strong head start is for a mic that was clearly the loudest; a close call can't name anyone by itself.
+      const lead = seg === loud ? (margin >= CLEAR_LEAD_DB ? 0.55 + Math.min(margin, 12) / 26 : 0.4 + Math.max(margin, 0) / 60) : 0;
+      const rel = seg === loud ? lead : Math.max(0, 0.35 - (speechDb(loud) - speechDb(seg)) / 30);
       deviceScores.set(owner, rel);
     }
     if (best.embedding === undefined) best.embedding = embed(best.pcm);
@@ -923,7 +965,7 @@ export class AudioPipeline {
       else if (!this.voiceprints.add(personId, heard.embedding, "correction", heard.heardAt)) learning = { learned: false, reason: `that line was heard before ${person.name}'s voice was reset` };
       else learning = { learned: true, cleaned, relabelled: this.relabelSimilar(heard.embedding, personId, u.id) };
     }
-    const next: Utterance = { ...u, personId, speakerName: person.name, confidence: 1, method: "manual" };
+    const next: Utterance = { ...u, personId, suggestedPersonId: null, speakerName: person.name, confidence: 1, method: "manual" };
     this.session.store.put("utterances", next);
     this.onLine?.(next, false);
     bus.send({ type: "utterance", utterance: next });
@@ -963,7 +1005,7 @@ export class AudioPipeline {
     for (const x of unlabeled) {
       const other = this.voiceOf(x).embedding;
       if (!other || cosine(normalize(other), e) < RELABEL_SIM) continue;
-      const next: Utterance = { ...x, personId, speakerName: person.name, confidence: 0.6, method: "voice" };
+      const next: Utterance = { ...x, personId, suggestedPersonId: null, speakerName: person.name, confidence: 0.6, method: "voice" };
       this.session.store.put("utterances", next);
       this.onLine?.(next, false);
       bus.send({ type: "utterance", utterance: next });
@@ -999,13 +1041,21 @@ export class AudioPipeline {
   }
 
   /** The embedding of an utterance's best copy and when it was heard, kept with its event so labels work after restarts. */
-  voiceFor(utteranceId: string): { embedding: number[] | null; heardAt?: number } {
+  voiceFor(utteranceId: string): { embedding: number[] | null; heardAt?: number; suggestedPersonId?: string | null } {
     const g = [...this.finalized, ...this.open].find((x) => x.utteranceId === utteranceId && !x.adopted);
-    if (!g) return { embedding: null };
+    // The suggestion rides along into the line's event (an unnamed line's one-tap "who was it?").
+    const suggestedPersonId = this.session.store.get("utterances", utteranceId)?.suggestedPersonId ?? null;
+    if (!g) return { embedding: null, suggestedPersonId };
     const best = pickBest(g.segments);
     if (best.embedding === undefined) best.embedding = embed(best.pcm);
-    return best.embedding ? { embedding: [...best.embedding], heardAt: best.heardAt } : { embedding: null };
+    return best.embedding ? { embedding: [...best.embedding], heardAt: best.heardAt, suggestedPersonId } : { embedding: null, suggestedPersonId };
   }
+}
+
+/** Who a guess may name: only a sure one. A less sure one leaves the line to "Someone" and is kept as a suggestion. */
+function attribute(guess: SpeakerGuess): { personId: string | null; suggestedPersonId: string | null } {
+  if (guess.personId && guess.confidence >= SURE) return { personId: guess.personId, suggestedPersonId: null };
+  return { personId: null, suggestedPersonId: guess.personId };
 }
 
 /** Lowercase words only: "Looks good." and "looks good" are the same words. */

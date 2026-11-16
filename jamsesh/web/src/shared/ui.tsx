@@ -844,6 +844,7 @@ function FeedLine({ e, state, editable, condensed, onSpeaker }: { e: JamEvent; s
             Shown, not spoken
           </span>
         )}
+        {editable && e.kind === "speech" && !e.authorId && !condensed && e.data.utteranceId && e.data.suggestedPersonId && <SuggestChip state={state} ev={e} />}
         {e.kind === "speech" && Array.isArray(e.data.attachments) && <FeedAttachments list={e.data.attachments} />}
         {e.kind === "brain" && e.data.spoken && (
           <span title="Said out loud" aria-label="Said out loud" style={{ marginLeft: 8, color: "var(--dim)", verticalAlign: "-2px", display: "inline-flex" }}>
@@ -928,6 +929,26 @@ function shortAgent(name?: string) {
 
 export function modeLabel(mode: string) {
   return mode === "explore" ? "Explore" : mode === "implement" ? "Build" : mode === "coordinate" ? "Coordinate" : mode === "answer" ? "Answer" : mode === "note" ? "Note" : mode;
+}
+
+/** A line the hub wouldn't name: "Chey?" is its best guess, and one tap assigns the line to them (the same route as the speaker popover). */
+function SuggestChip({ state, ev }: { state: HubState; ev: JamEvent }) {
+  const [busy, setBusy] = useState(false);
+  const person = state.people.find((p) => p.id === ev.data.suggestedPersonId);
+  if (!person) return null;
+  return (
+    <button
+      className="suggest-chip"
+      disabled={busy}
+      title={`Assign this line to ${person.name}`}
+      onClick={() => {
+        setBusy(true);
+        api(`/utterances/${ev.data.utteranceId}/assign`, { personId: person.id }).catch(() => setBusy(false));
+      }}
+    >
+      {person.name.split(/\s+/)[0]}?
+    </button>
+  );
 }
 
 function SpeakerPopover({ state, ev, x, y, onClose }: { state: HubState; ev: JamEvent; x: number; y: number; onClose: () => void }) {
