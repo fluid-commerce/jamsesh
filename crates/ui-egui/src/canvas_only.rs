@@ -41,6 +41,12 @@ pub fn slide(app: &FigApp, ctx: &egui::Context) -> (f32, f32) {
     (ease("canvas_panel_left", l), ease("canvas_panel_right", r))
 }
 
+/// Whether the floating tool toolbar shows: on a person's canvas (with panel buttons), never on
+/// the big screen's clean one.
+pub fn toolbar_shown(app: &FigApp) -> bool {
+    app.ui.canvas_only && app.ui.canvas_panels
+}
+
 /// A pill-shaped backdrop in the panel colours, so the overlay reads on any canvas.
 fn pill(painter: &egui::Painter, r: Rect, t: &Tokens) {
     let radius = CornerRadius::same((r.height() / 2.0).round() as u8);
@@ -190,7 +196,15 @@ fn zoom_chip(app: &mut FigApp, ctx: &egui::Context, canvas: Rect, zoom: f64) {
     let text = format!("{}%", (zoom * 100.0).round());
     let galley = ctx.fonts_mut(|f| f.layout_no_wrap(text, semibold(12.0), t.text_secondary));
     let size = vec2(galley.size().x + 24.0, 28.0);
-    let rect = Rect::from_min_size(pos2(canvas.max.x - MARGIN - size.x, canvas.max.y - MARGIN - size.y), size);
+    let mut rect = Rect::from_min_size(pos2(canvas.max.x - MARGIN - size.x, canvas.max.y - MARGIN - size.y), size);
+    if toolbar_shown(app) {
+        // The toolbar sits bottom centre; on a canvas too narrow to leave the chip room beside it,
+        // the chip rides just above it.
+        let bar = crate::toolbar::pill_rect(canvas, crate::toolbar::bar_width(app));
+        if bar.expand(MARGIN / 2.0).intersects(rect) {
+            rect = rect.translate(vec2(0.0, bar.min.y - MARGIN / 2.0 - rect.max.y));
+        }
+    }
     let mut fit = false;
     egui::Area::new(egui::Id::unique("canvas_only_zoom")).order(egui::Order::Foreground).fixed_pos(rect.min).show(ctx, |ui| {
         let resp = ui.interact(rect, ui.scope_id().with("chip"), Sense::click()).tip(tr("Zoom to fit"));
