@@ -1692,7 +1692,8 @@ export function halfSentence(text: string, name: string | string[], confidence?:
   const words = text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
   if (/^(but|and|so|or|because|then|um|uh)$/.test(words[words.length - 1] ?? "")) return true;
   const filler = new Set(["hey", "hi", "ok", "okay", "yo", "oh", "alright", ...nameForms(name), "jam", "sesh", "session", "jamsesh", "jamsession"]);
-  if (words.filter((w) => !filler.has(w)).length < 3 && !text.includes("?")) return true;
+  // Only the name and a greeting: the request comes next. A short command ("JamSesh, stop") is still a request.
+  if (words.every((w) => filler.has(w))) return true;
   // A low score on a longer line is more likely a noisy voice match than a half-said request, so only short lines wait on it.
   return typeof confidence === "number" && confidence < 0.55 && words.length <= 5;
 }

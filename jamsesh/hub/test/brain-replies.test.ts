@@ -69,7 +69,8 @@ test("halfSentence", () => {
   expect(halfSentence("JamSesh said this, but.", n)).toBe(true);
   expect(halfSentence("so JamSesh went and", n)).toBe(true);
   expect(halfSentence("Hey JamSesh", n)).toBe(true);
-  expect(halfSentence("JamSesh, the header", n)).toBe(true);
+  expect(halfSentence("JamSesh, stop", n)).toBe(false);
+  expect(halfSentence("JamSesh, mute", n)).toBe(false);
   expect(halfSentence("JamSesh, which one?", n)).toBe(false);
   expect(halfSentence("JamSesh, put the mockup on the screen", n)).toBe(false);
   expect(halfSentence("JamSesh, put the mockup on the screen", n, 0.2)).toBe(false);
