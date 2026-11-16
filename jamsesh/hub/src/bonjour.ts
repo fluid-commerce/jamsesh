@@ -14,6 +14,12 @@ function computerName() {
   return (r.status === 0 && r.stdout.trim()) || hostname().replace(/\.local$/, "");
 }
 
+/** A name fit for one TXT record entry: one line, no control characters, at most 40 characters; nothing when empty. */
+export function txtName(name: string | null | undefined) {
+  const clean = (name ?? "").replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  return clean ? [...clean].slice(0, 40).join("").trim() : undefined;
+}
+
 /** Start (or restart with new details) the advertisement. */
 export function advertise(port: number, txt: Record<string, string | undefined>) {
   stopAdvertising();

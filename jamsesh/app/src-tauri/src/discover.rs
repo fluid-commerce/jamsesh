@@ -9,11 +9,14 @@ use serde::Serialize;
 const SERVICE: &str = "_jamsesh._tcp.local.";
 
 #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Found {
     /// The host Mac's name, for example "Chey's Mac mini".
     pub name: String,
     /// The session's name, when the host shares it.
     pub session: Option<String>,
+    /// The project the session belongs to, when the host is in one (not in the lobby).
+    pub project: Option<String>,
     /// The address to join: `http://<lan address>:<port>`.
     pub url: String,
 }
@@ -224,9 +227,10 @@ pub fn start() -> Hosts {
                     let Some(addr) = v4.first() else { continue };
                     let full = info.get_fullname().to_string();
                     let name = plain_name(full.strip_suffix(&format!(".{SERVICE}")).unwrap_or(&full));
-                    let session = info.get_property_val_str("session").map(str::to_string).filter(|s| !s.is_empty());
+                    let text = |key: &str| info.get_property_val_str(key).map(str::to_string).filter(|s| !s.is_empty());
+                    let (session, project) = (text("session"), text("project"));
                     let url = format!("http://{addr}:{}", info.get_port());
-                    found.advertise(full, Found { name, session, url });
+                    found.advertise(full, Found { name, session, project, url });
                     // List it as soon as it answers, without waiting for the next sweep.
                     let list = found.clone();
                     std::thread::spawn(move || list.check(answers));
@@ -308,7 +312,7 @@ mod tests {
     }
 
     fn host(url: &str) -> Found {
-        Found { name: "Mac".into(), session: None, url: url.into() }
+        Found { name: "Mac".into(), session: None, project: None, url: url.into() }
     }
 
     #[test]
@@ -396,6 +400,14 @@ mod tests {
         let hosts = Hosts::default();
         hosts.advertise("a".into(), host("http://10.0.0.2:4747"));
         assert_ne!(hosts.status().reason, Some("offline"));
+    }
+
+    #[test]
+    fn the_project_goes_to_the_join_list_when_the_host_shares_it() {
+        let found = Found { project: Some("Passport Refine".into()), session: Some("Jam session".into()), ..host("http://10.0.0.2:4747") };
+        let json = serde_json::to_value(&found).unwrap_or_default();
+        assert_eq!(json["project"], "Passport Refine");
+        assert_eq!(serde_json::to_value(host("http://10.0.0.2:4747")).unwrap_or_default()["project"], serde_json::Value::Null);
     }
 
     #[test]

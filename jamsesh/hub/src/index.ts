@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { config, enterProject } from "./config";
 import { Hub, sharedOnce } from "./hub";
 import { startHttp } from "./http";
-import { advertise, stopAdvertising } from "./bonjour";
+import { advertise, stopAdvertising, txtName } from "./bonjour";
 import { readWindowLinks } from "./auth";
 import { linkSecretFile } from "./projects";
 
@@ -67,7 +67,7 @@ const startSecure = () => {
   }
 };
 startSecure();
-const announce = () => advertise(config.port, { session: hub.session.settings().sessionName, https: hub.net.status().enabled ? hub.net.status().publicUrl : undefined });
+const announce = () => advertise(config.port, { session: hub.session.settings().sessionName, project: txtName(config.project?.name), https: hub.net.status().enabled ? hub.net.status().publicUrl : undefined });
 hub.net.onCertChange(() => (startSecure(), announce()));
 announce();
 

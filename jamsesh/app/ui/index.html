@@ -184,7 +184,7 @@
           const where = scannedHost.origin.replace(/^https?:\/\//, "");
           list.append(joinRow(where, "From the QR code, not a session found on this network. Join only if it's the big screen in front of you.", scannedHost.origin, "Join", scannedHost.code));
         }
-        for (const h of found) list.append(joinRow(h.name, [h.session, h.url.replace(/^https?:\/\//, "")].filter(Boolean).join(" · "), h.url, "Join"));
+        for (const h of found) list.append(joinRow(h.name, [h.project, h.session, h.url.replace(/^https?:\/\//, "")].filter(Boolean).join(" · "), h.url, "Join"));
         if (info?.lastHost && !urls.has(info.lastHost)) {
           list.append(joinRow(info.lastHostName || info.lastHost.replace(/^https?:\/\//, ""), `Last time · ${info.lastHost.replace(/^https?:\/\//, "")}`, info.lastHost, "Rejoin"));
         }
