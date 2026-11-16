@@ -166,7 +166,7 @@ export class Brain {
     if (this.decideByVoice([ev])) return;
     // "Hey JamSesh…" then a pause: the same person's next line is the request.
     const name = brainNames(this.session.settings());
-    if (ev.kind !== "prompt" && addressesBrain(ev.text, name) && onlyTheName(ev.text, name)) {
+    if (ev.kind !== "prompt" && addressesBrain(ev.text, name) && (onlyTheName(ev.text, name) || (!ev.data?.typed && halfSentence(ev.text, name, ev.data?.confidence)))) {
       this.calledBy = { authorId: ev.authorId, until: Date.now() + 8000 };
       if (!ev.data?.typed) chime(this.session, ev.data?.deviceId);
       return;
@@ -1657,6 +1657,8 @@ export function isDirectRequest(e: JamEvent): e is JamEvent & { authorId: string
 }
 
 export function speechSource(batch: JamEvent[]): SpeechSource {
+  // Any line in the batch that was spoken to the brain, or was a spoken question, is answered out loud.
+  if (batch.some((e) => !e.data?.typed && !e.data?.recorded && (e.data?.direct || e.data?.asked || (e.authorType === "person" && e.kind !== "prompt" && e.data?.intent === "question")))) return "voice";
   const ev = batch[batch.length - 1];
   if (!ev) return "ambient";
   if (ev.data?.typed) return ev.data.direct || ev.data.asked ? "typed" : "ambient";
@@ -1679,6 +1681,21 @@ function describeBigScreens(s: Session): string[] {
 export function onlyTheName(text: string, name: string | string[]) {
   const filler = new Set(["hey", "hi", "ok", "okay", "yo", "so", "um", "uh", "oh", ...nameForms(name), "jam", "sesh", "session", "jamsesh", "jamsession"]);
   return text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w && !filler.has(w)).length === 0;
+}
+
+/**
+ * A spoken line that uses the name but isn't a request yet: it trails off on a conjunction or filler
+ * ("JamSesh said this, but."), has under three words besides the name and greetings with no question mark,
+ * or (when short) came with a low confidence. Heard like the bare name: the same speaker's next line is the request.
+ */
+export function halfSentence(text: string, name: string | string[], confidence?: unknown) {
+  const words = text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
+  if (/^(but|and|so|or|because|then|um|uh)$/.test(words[words.length - 1] ?? "")) return true;
+  const filler = new Set(["hey", "hi", "ok", "okay", "yo", "oh", "alright", ...nameForms(name), "jam", "sesh", "session", "jamsesh", "jamsession"]);
+  // Only the name and a greeting: the request comes next. A short command ("JamSesh, stop") is still a request.
+  if (words.every((w) => filler.has(w))) return true;
+  // A low score on a longer line is more likely a noisy voice match than a half-said request, so only short lines wait on it.
+  return typeof confidence === "number" && confidence < 0.55 && words.length <= 5;
 }
 
 /**

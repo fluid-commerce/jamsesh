@@ -317,7 +317,8 @@ export class Hub {
       // Said out loud to the brain: whoever said it isn't known for sure, so it relabels and teaches nothing.
       const { learning } = this.audio.assign(ev.data.utteranceId, person.id, { host: false, personId: null });
       this.confirmLearning(person.name, learning);
-      return `Line ${eventId} is now ${person.name}'s. ${learningNote(person.name, learning)}`;
+      // The notice is already on screen; a longer answer would be repeated aloud.
+      return "Done.";
     };
   }
 
@@ -1193,9 +1194,17 @@ export class Hub {
     return { ok: true as const, scrubbed };
   }
 
-  /** Says what a correction did, out loud when the room allows it and as a toast otherwise. */
+  /** When each housekeeping notice was last posted, so the same one isn't shown twice in a row. */
+  private noticeAt = new Map<string, number>();
+
+  /** Says what a correction did, on screen only (it is housekeeping, never spoken), and not twice within 30 s. */
   confirmLearning(name: string, learning: Learning) {
-    void speak(this.session, learningNote(name, learning), { source: "voice", kind: "confirm" });
+    const note = learningNote(name, learning);
+    const now = Date.now();
+    if (now - (this.noticeAt.get(note) ?? 0) < 30_000) return;
+    for (const [k, at] of this.noticeAt) if (now - at >= 30_000) this.noticeAt.delete(k);
+    this.noticeAt.set(note, now);
+    void speak(this.session, note, { source: "typed", kind: "confirm" });
   }
 
   async savePhoto(personId: string, bytes: Uint8Array) {
