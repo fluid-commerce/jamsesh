@@ -20,10 +20,40 @@ export function txtName(name: string | null | undefined) {
   return clean ? [...clean].slice(0, 40).join("").trim() : undefined;
 }
 
+/**
+ * The advertisers a gone hub left behind for this service and port: dns-sd processes macOS handed to launchd
+ * (parent 1) when their hub exited. Builds before the parent watch never stopped them, and the network can hand out
+ * their old details (no project) instead of the running hub's. One that still has a parent belongs to a live hub.
+ * `ps` is `ps -axo pid=,ppid=,command=` output.
+ */
+export function leftoverAdverts(ps: string, service: string, port: number): number[] {
+  const esc = service.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const ours = new RegExp(`^/usr/bin/dns-sd -R .+ ${esc} local ${port}(\\s|$)`);
+  const out: number[] = [];
+  for (const line of ps.split("\n")) {
+    const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
+    if (m && m[2] === "1" && ours.test(m[3])) out.push(Number(m[1]));
+  }
+  return out;
+}
+
+function stopLeftoverAdverts(port: number) {
+  const ps = spawnSync("/bin/ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8" });
+  if (ps.status !== 0) return;
+  for (const pid of leftoverAdverts(ps.stdout, SERVICE, port)) {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      // Gone already, or not ours to stop: either way it isn't advertising for this hub.
+    }
+  }
+}
+
 /** Start (or restart with new details) the advertisement. */
 export function advertise(port: number, txt: Record<string, string | undefined>) {
   stopAdvertising();
   if (process.platform !== "darwin") return;
+  stopLeftoverAdverts(port);
   const record = Object.entries(txt)
     .filter(([, v]) => v)
     .map(([k, v]) => `${k}=${v}`);
