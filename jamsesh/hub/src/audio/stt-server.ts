@@ -5,8 +5,10 @@
 // (Metal) on Apple silicon, with Hex's fork of the library when it's there (app/build-transcribe.sh),
 // which rescores the words Parakeet heard against the room's list.
 
+import { join } from "node:path";
 import { config } from "../config";
 import { recordedHashes, verifiedLibrary } from "./transcribe-lib";
+import { libraryEntry } from "./voiceprint";
 import { decodeWav, resample } from "./wav";
 
 /** The longest clip it decodes; the pipeline's clips are 15 s at most. */
@@ -25,8 +27,11 @@ export const MAX_TERMS = 64;
 export async function loadTranscribeCpp(): Promise<typeof import("transcribe-cpp")> {
   delete process.env.TRANSCRIBE_LIBRARY;
   process.env.TRANSCRIBE_LIBRARY = await verifiedLibrary(process.env, config.home, await recordedHashes());
-  const where: string = config.nodeModules ? Bun.resolveSync("transcribe-cpp", config.nodeModules) : Bun.resolveSync("transcribe-cpp", import.meta.dir);
-  await keepKoffiArrays(Bun.resolveSync("koffi", where));
+  // A compiled hub can't resolve a package by name from the bundle's node_modules folder, only load a file: the
+  // binding is loaded through the entry file its package.json names, as the voice library is (voiceprint.ts).
+  const where: string = config.nodeModules ? libraryEntry(join(config.nodeModules, "transcribe-cpp")) : Bun.resolveSync("transcribe-cpp", import.meta.dir);
+  // koffi's ES module entry (index.js), the copy the binding imports, by file in the bundle too.
+  await keepKoffiArrays(config.nodeModules ? join(config.nodeModules, "koffi", "index.js") : Bun.resolveSync("koffi", where));
   return await import(where);
 }
 
