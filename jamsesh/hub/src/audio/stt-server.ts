@@ -5,7 +5,7 @@
 // (Metal) on Apple silicon, with Hex's fork of the library when it's there (app/build-transcribe.sh),
 // which rescores the words Parakeet heard against the room's list.
 
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { config } from "../config";
 import { recordedHashes, verifiedLibrary } from "./transcribe-lib";
 import { libraryEntry } from "./voiceprint";
@@ -31,7 +31,7 @@ export async function loadTranscribeCpp(): Promise<typeof import("transcribe-cpp
   // binding is loaded through the entry file its package.json names, as the voice library is (voiceprint.ts).
   const where: string = config.nodeModules ? libraryEntry(join(config.nodeModules, "transcribe-cpp")) : Bun.resolveSync("transcribe-cpp", import.meta.dir);
   // koffi's ES module entry (index.js), the copy the binding imports, by file in the bundle too.
-  await keepKoffiArrays(config.nodeModules ? join(config.nodeModules, "koffi", "index.js") : Bun.resolveSync("koffi", where));
+  await keepKoffiArrays(config.nodeModules ? resolve(config.nodeModules, "koffi", "index.js") : Bun.resolveSync("koffi", where));
   return await import(where);
 }
 

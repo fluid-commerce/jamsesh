@@ -1,7 +1,7 @@
 // Voiceprints with a local speaker-embedding model (WeSpeaker ResNet34 through
 // sherpa-onnx). A person's voiceprint is the mean of their labelled samples.
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { config } from "../config";
 import type { Store, VoiceKind } from "../store";
 import type { Pcm } from "./wav";
@@ -16,7 +16,7 @@ let loadCode: VoiceStatus["code"] = "ok";
 /** Where people get the speaker model; it is the file the app bundles as models/wespeaker_en.onnx. */
 const MODEL_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx";
 
-/** A package folder's entry file: its package.json "main", or index.js. */
+/** A package folder's entry file, as an absolute path (a relative one would be taken for a package name): its package.json "main", or index.js. */
 export function libraryEntry(dir: string): string {
   let main = "index.js";
   try {
@@ -25,7 +25,7 @@ export function libraryEntry(dir: string): string {
   } catch {
     // No readable package.json: fall back to index.js, and the require reports what's missing.
   }
-  return join(dir, main);
+  return resolve(dir, main);
 }
 
 function getExtractor(): Extractor | null {

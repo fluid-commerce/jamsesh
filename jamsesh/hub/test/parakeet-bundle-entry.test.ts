@@ -11,3 +11,10 @@ test("the Parakeet binding's entry file is a real file in the layout the bundle 
   expect(entry.endsWith(join("transcribe-cpp", "dist", "index.js"))).toBe(true);
   expect(existsSync(entry)).toBe(true);
 });
+
+test("a relative bundle folder still gives an absolute entry (a relative one is read as a package name)", () => {
+  const rel = join("jamsesh", "app", "x", "node_modules", "transcribe-cpp");
+  const entry = libraryEntry(rel);
+  expect(entry.startsWith("/")).toBe(true);
+  expect(entry.endsWith(join(rel, "index.js"))).toBe(true);
+});
